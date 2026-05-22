@@ -30,10 +30,6 @@ pub enum DerivationKind {
     Json {
         source: serde_json::Value,
     },
-    Kdl {
-        #[allow(dead_code)]
-        source: serde_json::Value,
-    },
     Env {
         source: HashMap<String, String>,
     },

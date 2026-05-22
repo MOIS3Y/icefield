@@ -32,7 +32,6 @@ impl LuaEngine {
             ("mkTomlDerivation", "toml"),
             ("mkYamlDerivation", "yaml"),
             ("mkJsonDerivation", "json"),
-            ("mkKdlDerivation", "kdl"),
             ("mkEnvDerivation", "env"),
             ("mkIniDerivation", "ini"),
             ("mkSymlinkDerivation", "symlink"),

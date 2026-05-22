@@ -31,9 +31,6 @@ impl Builder {
                 serde_json::to_string_pretty(source)
                     .context("Failed to serialize JSON")
             }
-            DerivationKind::Kdl { .. } => {
-                Err(anyhow!("KDL serialization is not implemented yet"))
-            }
             DerivationKind::Env { source } => Ok(Self::build_env(source)),
             DerivationKind::Ini { source } => Self::build_ini(source),
             DerivationKind::Symlink { .. } => {
