@@ -1,0 +1,38 @@
+# --- Rust ---
+/target
+Cargo.lock
+
+# --- Nix ---
+result
+result-*
+.direnv/
+.envrc
+
+# --- Project Specific ---
+.test_env/
+*.bak
+*.tmp
+
+# --- Editors & IDEs ---
+# Neovim
+.netrwhist
+shada/
+
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# Zed
+.zed/
+.zed-settings.json
+
+# JetBrains
+.idea/
+
+# --- System ---
+.DS_Store
+Thumbs.db
