@@ -46,7 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     // Command dispatching
     match cli.command {
-        Commands::Apply { dry_run, force } => {
+        Commands::Switch { dry_run, force } => {
             if dry_run {
                 println!(
                     "{} {}",
@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
             let applier = Applier::new(state_path);
             applier.apply(&derivations, force)?;
         }
-        Commands::Status => {
+        Commands::Info => {
             // Displays the current state of managed files from state.json
             let state = state::State::load(&state_path)?;
             println!(

@@ -28,8 +28,8 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Apply the configuration to the system
-    Apply {
+    /// Switch to the provided configuration (alias for apply)
+    Switch {
         /// Dry run: show what would be done without making changes
         #[arg(short, long)]
         dry_run: bool,
@@ -38,6 +38,6 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-    /// Show current state of managed files
-    Status,
+    /// Show information about managed files and current state
+    Info,
 }

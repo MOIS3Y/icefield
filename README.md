@@ -51,7 +51,7 @@ nix develop
    ```
 3. Apply the configuration:
    ```bash
-   icefield apply
+   icefield switch
    ```
 
 ## License
