@@ -59,7 +59,7 @@ pub enum DerivationKind {
     ///
     /// Nested mapping: \[Section\] -> \[Key\] -> Value.
     Ini {
-        /// Nested mapping: [Section] -> [Key] -> Value.
+        /// Nested mapping: \[Section\] -> \[Key\] -> Value.
         source: HashMap<String, HashMap<String, String>>,
     },
     /// Generates a flat `.env` file from a simple key-value map.
