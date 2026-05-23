@@ -18,11 +18,11 @@ use tracing::{debug, info, warn};
 
 /// Synchronizes the desired configuration state with the filesystem.
 ///
-/// The `Applier` reads the previous state from a local database (`state.json`),
+/// The `Switcher` reads the previous state from a local database (`state.json`),
 /// compares it with the new derivations, writes the necessary files (using
 /// temporary files for atomicity), manages symbolic links, and removes
 /// files that are no longer tracked.
-pub struct Applier {
+pub struct Switcher {
     /// Path to the JSON file storing the state of managed configurations.
     state_path: PathBuf,
 }
@@ -34,8 +34,8 @@ enum ChangeKind {
     None,
 }
 
-impl Applier {
-    /// Creates a new `Applier` instance.
+impl Switcher {
+    /// Creates a new `Switcher` instance.
     pub fn new(state_path: PathBuf) -> Self {
         Self { state_path }
     }
@@ -570,7 +570,7 @@ mod tests {
         let state_path = dir.path().join("state.json");
         let target_path = dir.path().join("test.txt");
 
-        let applier = Applier::new(state_path.clone());
+        let switcher = Switcher::new(state_path.clone());
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Text {
@@ -578,7 +578,7 @@ mod tests {
             },
         }];
 
-        applier.apply(&derivations, false)?;
+        switcher.apply(&derivations, false)?;
 
         assert!(target_path.exists());
         assert_eq!(fs::read_to_string(&target_path)?, "hello");
@@ -602,9 +602,9 @@ mod tests {
             .insert(target_path.clone(), "old-hash".to_string());
         initial_state.save(&state_path)?;
 
-        let applier = Applier::new(state_path);
+        let switcher = Switcher::new(state_path);
         // Apply an empty config
-        applier.apply(&[], false)?;
+        switcher.apply(&[], false)?;
 
         assert!(!target_path.exists());
         Ok(())
@@ -619,7 +619,7 @@ mod tests {
         let source_path = dir.path().join("source.txt");
         fs::write(&source_path, "content")?;
 
-        let applier = Applier::new(state_path);
+        let switcher = Switcher::new(state_path);
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Symlink {
@@ -627,7 +627,7 @@ mod tests {
             },
         }];
 
-        applier.apply(&derivations, false)?;
+        switcher.apply(&derivations, false)?;
 
         assert!(fs::symlink_metadata(&target_path)?.file_type().is_symlink());
         assert_eq!(fs::read_link(&target_path)?, source_path);

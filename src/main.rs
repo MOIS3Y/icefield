@@ -7,7 +7,6 @@
 //! 2. **Build**: Render templates and serialize data into final content.
 //! 3. **Commit**: Synchronize the built content with the filesystem.
 
-mod applier;
 mod builder;
 mod cli;
 mod logging;
@@ -16,13 +15,14 @@ mod lua_engine;
 mod model;
 mod paths;
 mod state;
+mod switcher;
 mod utils;
 
-use applier::Applier;
 use clap::Parser;
 use cli::{Cli, Commands};
 use console::style;
 use lua_engine::LuaEngine;
+use switcher::Switcher;
 
 /// Application entry point.
 ///
@@ -74,8 +74,8 @@ fn main() -> anyhow::Result<()> {
             let derivations = LuaEngine::load_file(&config_path)?;
 
             // Phase 2 & 3: Build and Commit
-            let applier = Applier::new(state_path);
-            applier.apply(&derivations, force)?;
+            let switcher = Switcher::new(state_path);
+            switcher.apply(&derivations, force)?;
         }
         Commands::Info => {
             // Displays the current state of managed files from state.json
