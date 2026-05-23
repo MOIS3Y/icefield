@@ -56,16 +56,16 @@ impl LuaEngine {
         let globals = lua.globals();
 
         let kinds = [
-            ("mkTomlDerivation", "toml"),
-            ("mkYamlDerivation", "yaml"),
             ("mkJsonDerivation", "json"),
-            ("mkEnvDerivation", "env"),
+            ("mkYamlDerivation", "yaml"),
+            ("mkTomlDerivation", "toml"),
             ("mkIniDerivation", "ini"),
-            ("mkSymlinkDerivation", "symlink"),
-            ("mkScssDerivation", "scss"),
-            ("mkTemplateDerivation", "template"),
+            ("mkEnvDerivation", "env"),
             ("mkTextDerivation", "text"),
+            ("mkTemplateDerivation", "template"),
+            ("mkScssDerivation", "scss"),
             ("mkCopyDerivation", "copy"),
+            ("mkSymlinkDerivation", "symlink"),
         ];
 
         for (func_name, kind_tag) in kinds {

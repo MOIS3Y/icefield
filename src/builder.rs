@@ -29,30 +29,30 @@ impl Builder {
     pub fn build(derivation: &Derivation) -> Result<String> {
         tracing::debug!("Building derivation: {}", derivation.meta.name);
         let content = match &derivation.kind {
-            DerivationKind::Toml { source } => {
-                toml::to_string(source).context("Failed to serialize TOML")
-            }
-            DerivationKind::Yaml { source } => serde_yaml::to_string(source)
-                .context("Failed to serialize YAML"),
             DerivationKind::Json { source } => {
                 serde_json::to_string_pretty(source)
                     .context("Failed to serialize JSON")
             }
-            DerivationKind::Env { source } => Ok(Self::build_env(source)),
-            DerivationKind::Ini { source } => Self::build_ini(source),
-            DerivationKind::Symlink { .. } => {
-                Ok(String::new()) // Symlinks don't have content
+            DerivationKind::Yaml { source } => serde_yaml::to_string(source)
+                .context("Failed to serialize YAML"),
+            DerivationKind::Toml { source } => {
+                toml::to_string(source).context("Failed to serialize TOML")
             }
-            DerivationKind::Scss {
-                template_path,
-                variables,
-            } => Self::build_scss(template_path, variables),
+            DerivationKind::Ini { source } => Self::build_ini(source),
+            DerivationKind::Env { source } => Ok(Self::build_env(source)),
+            DerivationKind::Text { source } => Ok(source.clone()),
             DerivationKind::Template {
                 template_path,
                 variables,
             } => Self::build_template(template_path, variables),
-            DerivationKind::Text { source } => Ok(source.clone()),
+            DerivationKind::Scss {
+                template_path,
+                variables,
+            } => Self::build_scss(template_path, variables),
             DerivationKind::Copy { .. } => Ok(String::new()),
+            DerivationKind::Symlink { .. } => {
+                Ok(String::new()) // Symlinks don't have content
+            }
         }?;
 
         tracing::debug!(

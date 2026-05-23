@@ -18,6 +18,9 @@ pub struct CommonMeta {
     pub name: String,
     /// The final destination path on the filesystem.
     pub target: PathBuf,
+    /// If true, always overwrite the file even if the content hash hasn't changed.
+    pub force: Option<bool>,
+
     /// Whether to use elevated privileges (sudo/doas) for writing this file.
     pub sudo: Option<bool>,
     /// The system user who should own the file (requires `sudo`).
@@ -28,8 +31,6 @@ pub struct CommonMeta {
     pub mode: Option<u32>,
     /// Shortcut to set the executable bit (mode | 0o111).
     pub executable: Option<bool>,
-    /// If true, always overwrite the file even if the content hash hasn't changed.
-    pub force: Option<bool>,
 }
 
 /// Specific data depending on the chosen constructor.
@@ -40,8 +41,9 @@ pub struct CommonMeta {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DerivationKind {
-    /// Generates a TOML file from a Lua table.
-    Toml {
+    // --- Structured Data (Serialization) ---
+    /// Generates a JSON file from a Lua table.
+    Json {
         /// The data structure to serialize.
         source: serde_json::Value,
     },
@@ -50,15 +52,10 @@ pub enum DerivationKind {
         /// The data structure to serialize.
         source: serde_json::Value,
     },
-    /// Generates a JSON file from a Lua table.
-    Json {
+    /// Generates a TOML file from a Lua table.
+    Toml {
         /// The data structure to serialize.
         source: serde_json::Value,
-    },
-    /// Generates a flat `.env` file from a simple key-value map.
-    Env {
-        /// Mapping of environment variable names to their values.
-        source: HashMap<String, String>,
     },
     /// Generates an INI file with sections.
     ///
@@ -67,17 +64,17 @@ pub enum DerivationKind {
         /// Nested mapping: [Section] -> [Key] -> Value.
         source: HashMap<String, HashMap<String, String>>,
     },
-    /// Creates a symbolic link to an existing file or directory.
-    Symlink {
-        /// The source path the link should point to.
-        source_path: PathBuf,
+    /// Generates a flat `.env` file from a simple key-value map.
+    Env {
+        /// Mapping of environment variable names to their values.
+        source: HashMap<String, String>,
     },
-    /// Compiles SCSS to CSS, supporting template variables.
-    Scss {
-        /// Path to the SCSS template file.
-        template_path: PathBuf,
-        /// Variables to inject into the SCSS template before compilation.
-        variables: serde_json::Value,
+
+    // --- Text and Templates (Rendering) ---
+    /// Writes raw, unformatted text directly to a file.
+    Text {
+        /// The string content to write.
+        source: String,
     },
     /// Renders a Tera (Jinja2-style) template.
     Template {
@@ -86,14 +83,23 @@ pub enum DerivationKind {
         /// Variables to inject into the template.
         variables: serde_json::Value,
     },
-    /// Writes raw, unformatted text directly to a file.
-    Text {
-        /// The string content to write.
-        source: String,
+    /// Compiles SCSS to CSS, supporting template variables.
+    Scss {
+        /// Path to the SCSS template file.
+        template_path: PathBuf,
+        /// Variables to inject into the SCSS template before compilation.
+        variables: serde_json::Value,
     },
+
+    // --- Direct Assets (Filesystem) ---
     /// Physically copies a file from the configuration repository to the target.
     Copy {
         /// Path to the source file in the configuration repository.
+        source_path: PathBuf,
+    },
+    /// Creates a symbolic link to an existing file or directory.
+    Symlink {
+        /// The source path the link should point to.
         source_path: PathBuf,
     },
 }
