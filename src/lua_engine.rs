@@ -135,6 +135,7 @@ impl LuaEngine {
             ("mkSymlinkDerivation", "symlink"),
             ("mkScssDerivation", "scss"),
             ("mkTemplateDerivation", "template"),
+            ("mkTextDerivation", "text"),
         ];
 
         for (func_name, kind_tag) in kinds {

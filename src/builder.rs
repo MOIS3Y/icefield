@@ -44,6 +44,7 @@ impl Builder {
                 template_path,
                 variables,
             } => Self::build_template(template_path, variables),
+            DerivationKind::Text { source } => Ok(source.clone()),
         }?;
 
         tracing::debug!(
@@ -222,6 +223,19 @@ mod tests {
         let variables = json!({ "color": "red" });
         let content = Builder::build_scss(file.path(), &variables)?;
         assert!(content.contains("color: red"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_text() -> Result<()> {
+        let der = Derivation {
+            meta: mock_meta(),
+            kind: DerivationKind::Text {
+                source: "hello text".to_string(),
+            },
+        };
+        let content = Builder::build(&der)?;
+        assert_eq!(content, "hello text");
         Ok(())
     }
 }

@@ -45,6 +45,9 @@ pub enum DerivationKind {
         template_path: PathBuf,
         variables: serde_json::Value,
     },
+    Text {
+        source: String,
+    },
 }
 
 /// Unified structure obtained from the Lua context after execution.
