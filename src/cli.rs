@@ -38,8 +38,6 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
-    /// Clean up orphaned files (Garbage Collection)
-    Gc,
     /// Show current state of managed files
     Status,
 }

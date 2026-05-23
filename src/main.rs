@@ -77,16 +77,6 @@ fn main() -> anyhow::Result<()> {
             let applier = Applier::new(state_path);
             applier.apply(&derivations, force)?;
         }
-        Commands::Gc => {
-            println!(
-                "{} {}",
-                style("❄").blue(),
-                style("Computing configuration").bold()
-            );
-            let derivations = LuaEngine::load_file(&config_path)?;
-            let applier = Applier::new(state_path);
-            applier.gc(&derivations)?;
-        }
         Commands::Status => {
             // Displays the current state of managed files from state.json
             let state = state::State::load(&state_path)?;
