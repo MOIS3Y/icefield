@@ -9,6 +9,7 @@
 
 mod builder;
 mod cli;
+mod inspector;
 mod logging;
 mod lua_api;
 mod lua_engine;
@@ -78,21 +79,7 @@ fn main() -> anyhow::Result<()> {
             switcher.apply(&derivations, force)?;
         }
         Commands::Info => {
-            // Displays the current state of managed files from state.json
-            let state = state::State::load(&state_path)?;
-            println!(
-                "{} Found {} managed files",
-                style("❄").blue(),
-                style(state.managed_files.len()).bold()
-            );
-            for (path, hash) in state.managed_files {
-                println!(
-                    "  {} {} {}",
-                    style("•").dim(),
-                    style(path.display()).cyan(),
-                    style(format!("[{}]", &hash[..8])).dim()
-                );
-            }
+            inspector::inspect(&state_path)?;
         }
     }
 
