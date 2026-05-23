@@ -1,4 +1,5 @@
 use crate::model::Derivation;
+use anyhow::{Context, anyhow};
 use mlua::{Lua, LuaSerdeExt, Result, Table, Value};
 
 /// Engine for executing Lua configurations and generating Derivations.
@@ -128,15 +129,85 @@ impl LuaEngine {
         );
         Ok(derivations)
     }
+
+    /// Loads and executes a Lua configuration from a file.
+    ///
+    /// This is a high-level helper that:
+    /// 1. Reads the file content.
+    /// 2. Determines the configuration root directory.
+    /// 3. Initializes a new `LuaEngine`.
+    /// 4. Executes Phase 1 (Compute).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, has syntax errors,
+    /// or fails to produce a valid list of derivations.
+    pub fn load_file(
+        path: &std::path::Path,
+    ) -> anyhow::Result<Vec<Derivation>> {
+        if !path.exists() {
+            anyhow::bail!("Config file not found: {:?}", path);
+        }
+
+        let source = std::fs::read_to_string(path).with_context(|| {
+            format!("Failed to read config file: {:?}", path)
+        })?;
+
+        let config_dir =
+            path.parent().unwrap_or_else(|| std::path::Path::new("."));
+
+        let engine = Self::new(config_dir)
+            .map_err(|e| anyhow!("Failed to initialize Lua engine: {}", e))?;
+
+        engine
+            .execute(&source, &path.to_string_lossy())
+            .map_err(|e| anyhow!("Lua execution failed: {}", e))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_load_file_success() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let config_path = dir.path().join("init.lua");
+        let mut file = std::fs::File::create(&config_path)?;
+
+        writeln!(
+            file,
+            r#"
+            return {{
+                mkTomlDerivation({{
+                    name = "test",
+                    target = "out.toml",
+                    source = {{}}
+                }})
+            }}
+            "#
+        )?;
+
+        let derivations = LuaEngine::load_file(&config_path)?;
+        assert_eq!(derivations.len(), 1);
+        assert_eq!(derivations[0].meta.name, "test");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_file_not_found() {
+        let result =
+            LuaEngine::load_file(std::path::Path::new("non_existent.lua"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
 
     #[test]
     fn test_execute_simple_config() -> Result<()> {
-        let engine = LuaEngine::new(std::path::Path::new("/dummy/config"))?;
+        let engine =
+            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
         let script = r#"
             return {
                 mkTomlDerivation({
@@ -159,7 +230,8 @@ mod tests {
 
     #[test]
     fn test_execute_multiple_derivations() -> Result<()> {
-        let engine = LuaEngine::new(std::path::Path::new("/dummy/config"))?;
+        let engine =
+            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
         let script = r#"
             return {
                 mkTomlDerivation({

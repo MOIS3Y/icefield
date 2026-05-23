@@ -52,19 +52,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
-            if !config_path.exists() {
-                anyhow::bail!("Config file not found: {:?}", config_path);
-            }
-
-            // Phase 1: Compute Graph (Lua)
-            let script = std::fs::read_to_string(&config_path)?;
-            let config_dir =
-                config_path.parent().unwrap_or(std::path::Path::new(""));
-            let engine = LuaEngine::new(config_dir)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            let derivations = engine
-                .execute(&script, &config_path.to_string_lossy())
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            let derivations = LuaEngine::load_file(&config_path)?;
 
             if dry_run {
                 // Phase 2: Build (in-memory simulation for dry run)
@@ -78,9 +66,9 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Commands::Gc => {
-            tracing::info!(
-                "Garbage collection not implemented as standalone yet."
-            );
+            let derivations = LuaEngine::load_file(&config_path)?;
+            let applier = Applier::new(state_path);
+            applier.gc(&derivations)?;
         }
         Commands::Status => {
             // Displays the current state of managed files from state.json

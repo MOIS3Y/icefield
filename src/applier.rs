@@ -103,6 +103,36 @@ impl Applier {
         Ok(())
     }
 
+    /// Performs standalone garbage collection.
+    ///
+    /// It identifies files that are present in the state database but missing
+    /// from the provided list of derivations, removes them from the filesystem,
+    /// and updates the state database.
+    pub fn gc(&self, derivations: &[Derivation]) -> Result<()> {
+        info!("Running garbage collection...");
+        let current_state = State::load(&self.state_path)?;
+        let mut seen_targets = HashSet::new();
+
+        for der in derivations {
+            seen_targets.insert(der.meta.target.clone());
+        }
+
+        // Remove orphaned files from disk
+        self.garbage_collect(&current_state, &seen_targets)?;
+
+        // Create a new state containing only the files that were NOT orphans
+        let mut new_state = State::default();
+        for (path, hash) in current_state.managed_files {
+            if seen_targets.contains(&path) {
+                new_state.managed_files.insert(path, hash);
+            }
+        }
+
+        new_state.save(&self.state_path)?;
+        info!("Garbage collection finished successfully.");
+        Ok(())
+    }
+
     /// Removes files that were managed in the previous state but are missing
     /// in the current configuration. If a standard remove fails due to permissions,
     /// it attempts to remove the file using elevated privileges.
