@@ -149,12 +149,13 @@ mod tests {
     fn mock_meta() -> CommonMeta {
         CommonMeta {
             name: "test".to_string(),
-            target: PathBuf::from("/tmp/test"),
+            target: PathBuf::from("dummy/path.txt"),
             sudo: None,
             owner: None,
             group: None,
             mode: None,
             executable: None,
+            force: None,
         }
     }
 

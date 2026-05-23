@@ -39,10 +39,16 @@ fn main() -> anyhow::Result<()> {
 
     // Command dispatching
     match cli.command {
-        Commands::Apply { dry_run } => {
+        Commands::Apply { dry_run, force } => {
             if dry_run {
                 tracing::info!(
                     "Dry run mode enabled. No changes will be made."
+                );
+            }
+
+            if force {
+                tracing::warn!(
+                    "Force mode enabled. Cache optimization will be bypassed."
                 );
             }
 
@@ -66,7 +72,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 // Phase 2 & 3: Build and Commit
                 let applier = Applier::new(state_path);
-                applier.apply(&derivations)?;
+                applier.apply(&derivations, force)?;
             }
         }
         Commands::Gc => {

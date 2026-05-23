@@ -86,7 +86,7 @@ mod tests {
             return {
                 mkTomlDerivation({
                     name = "test-toml",
-                    target = "/tmp/test.toml",
+                    target = "dummy/test.toml",
                     source = { key = "value" }
                 })
             }
@@ -97,7 +97,7 @@ mod tests {
         assert_eq!(derivations[0].meta.name, "test-toml");
         assert_eq!(
             derivations[0].meta.target.to_str().unwrap(),
-            "/tmp/test.toml"
+            "dummy/test.toml"
         );
         Ok(())
     }
@@ -109,12 +109,12 @@ mod tests {
             return {
                 mkTomlDerivation({
                     name = "toml",
-                    target = "/tmp/toml",
+                    target = "dummy/toml",
                     source = {}
                 }),
                 mkSymlinkDerivation({
                     name = "link",
-                    target = "/tmp/link",
+                    target = "dummy/link",
                     source_path = "/src/path"
                 })
             }

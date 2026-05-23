@@ -27,6 +27,10 @@ pub enum Commands {
         /// Dry run: show what would be done without making changes
         #[arg(short, long)]
         dry_run: bool,
+
+        /// Force overwrite of all files, ignoring the state cache
+        #[arg(short, long)]
+        force: bool,
     },
     /// Clean up orphaned files (Garbage Collection)
     Gc,

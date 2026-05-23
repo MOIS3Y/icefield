@@ -1,41 +1,55 @@
+//! Phase 3: Commit.
+//!
+//! This module is responsible for applying the computed derivations to the
+//! actual filesystem. It handles atomicity, privilege elevation (sudo/doas),
+//! permission management, and garbage collection of orphaned files.
+
 use crate::builder::Builder;
 use crate::model::{Derivation, DerivationKind};
 use crate::state::State;
 use crate::utils::hash_content;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-/// The `Applier` is responsible for "Phase 3: Commit".
+/// Synchronizes the desired configuration state with the filesystem.
 ///
-/// It synchronizes the desired state (calculated in Phase 1 and built in
-/// Phase 2) with the actual state of the filesystem. It also handles
-/// garbage collection by removing files that are no longer managed.
+/// The `Applier` reads the previous state from a local database (`state.json`),
+/// compares it with the new derivations, writes the necessary files (using
+/// temporary files for atomicity), manages symbolic links, and removes
+/// files that are no longer tracked.
 pub struct Applier {
+    /// Path to the JSON file storing the state of managed configurations.
     state_path: PathBuf,
 }
 
 impl Applier {
-    /// Creates a new `Applier` with the specified state database path.
+    /// Creates a new `Applier` instance.
     pub fn new(state_path: PathBuf) -> Self {
         Self { state_path }
     }
 
+    /// Detects the available privilege elevation tool.
+    ///
+    /// Currently supports `sudo` and `doas`. Returns `None` if neither is found.
+    fn get_elevation_tool(&self) -> Option<&'static str> {
+        if which::which("sudo").is_ok() {
+            Some("sudo")
+        } else if which::which("doas").is_ok() {
+            Some("doas")
+        } else {
+            None
+        }
+    }
+
     /// Applies a list of derivations to the system.
-    ///
-    /// This method:
-    /// 1. Loads the current state from disk.
-    /// 2. Iterates through derivations, building and writing them if changed.
-    /// 3. Detects and removes "orphaned" files (files in state but not in config).
-    /// 4. Saves the new state back to disk.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any file operation fails or if duplicate target
-    /// paths are detected in the configuration.
-    pub fn apply(&self, derivations: &[Derivation]) -> Result<()> {
+    pub fn apply(
+        &self,
+        derivations: &[Derivation],
+        global_force: bool,
+    ) -> Result<()> {
         info!("Applying configuration...");
         let current_state = State::load(&self.state_path)?;
         let mut new_state = State::default();
@@ -44,14 +58,20 @@ impl Applier {
         for der in derivations {
             let target = &der.meta.target;
 
-            if seen_targets.contains(target) {
+            if !seen_targets.insert(target.clone()) {
                 anyhow::bail!("Duplicate target path: {:?}", target);
             }
-            seen_targets.insert(target.clone());
+
+            let is_forced = global_force || der.meta.force.unwrap_or(false);
 
             match &der.kind {
                 DerivationKind::Symlink { source_path } => {
-                    self.apply_symlink(target, source_path)?;
+                    self.apply_symlink(
+                        target,
+                        source_path,
+                        &der.meta,
+                        is_forced,
+                    )?;
                     new_state.managed_files.insert(
                         target.clone(),
                         format!("symlink:{}", source_path.display()),
@@ -61,7 +81,9 @@ impl Applier {
                     let content = Builder::build(der)?;
                     let hash = hash_content(&content);
 
-                    if current_state.managed_files.get(target) != Some(&hash)
+                    if is_forced
+                        || current_state.managed_files.get(target)
+                            != Some(&hash)
                         || !target.exists()
                     {
                         self.write_file(target, &content, &der.meta)?;
@@ -74,38 +96,158 @@ impl Applier {
             }
         }
 
-        // Garbage collection: remove files that were in the state but are no
-        // longer in the current configuration.
-        for path in current_state.managed_files.keys() {
-            if !seen_targets.contains(path) {
-                warn!("Removing orphaned file: {:?}", path);
-                if path.exists() {
-                    fs::remove_file(path).with_context(|| {
-                        format!("Failed to remove orphan: {:?}", path)
-                    })?;
-                }
-            }
-        }
+        self.garbage_collect(&current_state, &seen_targets)?;
 
         new_state.save(&self.state_path)?;
         info!("Apply finished successfully.");
         Ok(())
     }
 
-    /// Writes content to a file and ensures parent directories exist.
-    ///
-    /// On Unix systems, it also sets the file mode (permissions).
+    /// Removes files that were managed in the previous state but are missing
+    /// in the current configuration. If a standard remove fails due to permissions,
+    /// it attempts to remove the file using elevated privileges.
+    fn garbage_collect(
+        &self,
+        current_state: &State,
+        seen_targets: &HashSet<PathBuf>,
+    ) -> Result<()> {
+        for path in current_state.managed_files.keys() {
+            if seen_targets.contains(path) {
+                continue;
+            }
+
+            warn!("Removing orphaned file: {:?}", path);
+            if !path.exists() && fs::symlink_metadata(path).is_err() {
+                continue;
+            }
+
+            if let Err(e) = fs::remove_file(path) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    self.remove_elevated(path)?;
+                } else {
+                    return Err(e).with_context(|| {
+                        format!("Failed to remove orphan: {:?}", path)
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes a file using the detected elevation tool (sudo/doas).
+    fn remove_elevated(&self, path: &PathBuf) -> Result<()> {
+        let tool = self.get_elevation_tool().ok_or_else(|| {
+            anyhow!(
+                "Permission denied and no elevation tool found for: {:?}",
+                path
+            )
+        })?;
+
+        duct::cmd!(tool, "rm", path).run().with_context(|| {
+            format!("Failed to remove orphan with elevation: {:?}", path)
+        })?;
+        Ok(())
+    }
+
+    /// Writes content to a file, handling elevation if requested or required.
     fn write_file(
         &self,
         path: &PathBuf,
         content: &str,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        info!("Writing: {:?}", path);
-        if let Some(parent) = path.parent() {
+        let use_sudo = meta.sudo.unwrap_or(false)
+            || meta.owner.is_some()
+            || meta.group.is_some();
+        info!(
+            "Writing{}: {:?}",
+            if use_sudo { " (elevated)" } else { "" },
+            path
+        );
+
+        let temp_file = tempfile::NamedTempFile::new()?;
+        fs::write(temp_file.path(), content)?;
+
+        if use_sudo {
+            self.write_elevated(temp_file.path(), path, meta)?;
+        } else {
+            self.write_standard(temp_file, path, meta)?;
+        }
+
+        Ok(())
+    }
+
+    /// Copies a temporary file to its final destination using elevated privileges.
+    fn write_elevated(
+        &self,
+        temp_path: &std::path::Path,
+        dest_path: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        let tool = self.get_elevation_tool().ok_or_else(|| {
+            anyhow!("Elevation requested but no elevation tool found")
+        })?;
+
+        if let Some(parent) = dest_path.parent().filter(|p| !p.exists()) {
+            duct::cmd!(tool, "mkdir", "-p", parent).run()?;
+        }
+
+        duct::cmd!(tool, "cp", temp_path, dest_path).run()?;
+        self.apply_ownership_elevated(tool, dest_path, meta)?;
+        self.apply_permissions_elevated(tool, dest_path, meta)?;
+
+        Ok(())
+    }
+
+    /// Applies ownership changes using an elevation tool.
+    fn apply_ownership_elevated(
+        &self,
+        tool: &str,
+        path: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        if let Some(owner) = &meta.owner {
+            let group = meta.group.as_deref().unwrap_or("");
+            let spec = if group.is_empty() {
+                owner.clone()
+            } else {
+                format!("{}:{}", owner, group)
+            };
+            duct::cmd!(tool, "chown", spec, path).run()?;
+        } else if let Some(group) = &meta.group {
+            duct::cmd!(tool, "chgrp", group, path).run()?;
+        }
+        Ok(())
+    }
+
+    /// Applies permissions (mode and executable flag) using an elevation tool.
+    fn apply_permissions_elevated(
+        &self,
+        tool: &str,
+        path: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        let mode = meta.mode.unwrap_or(0o644);
+        let final_mode = if meta.executable.unwrap_or(false) {
+            mode | 0o111
+        } else {
+            mode
+        };
+        duct::cmd!(tool, "chmod", format!("{:o}", final_mode), path).run()?;
+        Ok(())
+    }
+
+    /// Persists a temporary file to its final destination with standard privileges.
+    fn write_standard(
+        &self,
+        temp_file: tempfile::NamedTempFile,
+        dest_path: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        if let Some(parent) = dest_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, content)?;
+        temp_file.persist(dest_path).map_err(|e| anyhow!(e))?;
 
         #[cfg(unix)]
         {
@@ -114,41 +256,107 @@ impl Applier {
             if meta.executable.unwrap_or(false) {
                 mode |= 0o111;
             }
-            fs::set_permissions(path, fs::Permissions::from_mode(mode))?;
+            fs::set_permissions(dest_path, fs::Permissions::from_mode(mode))?;
+        }
+        Ok(())
+    }
+
+    /// Dispatches symlink creation to standard or elevated handlers.
+    fn apply_symlink(
+        &self,
+        target: &PathBuf,
+        source: &PathBuf,
+        meta: &crate::model::CommonMeta,
+        is_forced: bool,
+    ) -> Result<()> {
+        let use_sudo = meta.sudo.unwrap_or(false);
+
+        if !is_forced && self.is_symlink_correct(target, source)? {
+            debug!("Symlink already correct: {:?}", target);
+            return Ok(());
+        }
+
+        self.remove_target_if_exists(target, use_sudo)?;
+
+        info!(
+            "Linking{}: {:?} -> {:?}",
+            if use_sudo { " (elevated)" } else { "" },
+            target,
+            source
+        );
+
+        if use_sudo {
+            self.create_symlink_elevated(target, source)?;
+        } else {
+            self.create_symlink_standard(target, source)?;
         }
 
         Ok(())
     }
 
-    /// Manages a symbolic link.
-    ///
-    /// If a file or link already exists at the target path, it will be
-    /// removed if it points to the wrong location or if it's a regular file.
-    fn apply_symlink(&self, target: &PathBuf, source: &PathBuf) -> Result<()> {
+    /// Checks if a symlink exists at the target path and points to the correct source.
+    fn is_symlink_correct(
+        &self,
+        target: &PathBuf,
+        source: &PathBuf,
+    ) -> Result<bool> {
         if target.exists() || fs::symlink_metadata(target).is_ok() {
             let metadata = fs::symlink_metadata(target)?;
-            if metadata.file_type().is_symlink() {
-                if &fs::read_link(target)? == source {
-                    debug!("Symlink already correct: {:?}", target);
-                    return Ok(());
-                }
-                fs::remove_file(target)?;
+            if metadata.file_type().is_symlink()
+                && &fs::read_link(target)? == source
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Removes an existing file or symlink at the target path before creating a new link.
+    /// Uses elevated privileges if requested.
+    fn remove_target_if_exists(
+        &self,
+        target: &PathBuf,
+        use_sudo: bool,
+    ) -> Result<()> {
+        if target.exists() || fs::symlink_metadata(target).is_ok() {
+            if use_sudo {
+                self.remove_elevated(target)?;
             } else {
-                warn!("Replacing regular file with symlink: {:?}", target);
                 fs::remove_file(target)?;
             }
         }
+        Ok(())
+    }
 
-        info!("Linking: {:?} -> {:?}", target, source);
+    /// Creates a symlink using an elevation tool, ensuring the parent directory exists.
+    fn create_symlink_elevated(
+        &self,
+        target: &PathBuf,
+        source: &PathBuf,
+    ) -> Result<()> {
+        let tool = self
+            .get_elevation_tool()
+            .ok_or_else(|| anyhow!("No elevation tool found"))?;
+        if let Some(parent) = target.parent().filter(|p| !p.exists()) {
+            duct::cmd!(tool, "mkdir", "-p", parent).run()?;
+        }
+        duct::cmd!(tool, "ln", "-sf", source, target).run()?;
+        Ok(())
+    }
+
+    /// Creates a symlink with standard privileges, ensuring the parent directory exists.
+    fn create_symlink_standard(
+        &self,
+        target: &PathBuf,
+        source: &PathBuf,
+    ) -> Result<()> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-
         #[cfg(unix)]
         std::os::unix::fs::symlink(source, target)?;
         #[cfg(not(unix))]
         return Err(anyhow::anyhow!("Symlinks are only supported on Unix"));
-
         Ok(())
     }
 }
@@ -169,6 +377,7 @@ mod tests {
             group: None,
             mode: None,
             executable: None,
+            force: None,
         }
     }
 
@@ -186,7 +395,7 @@ mod tests {
             },
         }];
 
-        applier.apply(&derivations)?;
+        applier.apply(&derivations, false)?;
 
         assert!(target_path.exists());
         assert_eq!(fs::read_to_string(&target_path)?, "foo = \"bar\"\n");
@@ -212,7 +421,7 @@ mod tests {
 
         let applier = Applier::new(state_path);
         // Apply an empty config
-        applier.apply(&[])?;
+        applier.apply(&[], false)?;
 
         assert!(!target_path.exists());
         Ok(())
@@ -235,7 +444,7 @@ mod tests {
             },
         }];
 
-        applier.apply(&derivations)?;
+        applier.apply(&derivations, false)?;
 
         assert!(fs::symlink_metadata(&target_path)?.file_type().is_symlink());
         assert_eq!(fs::read_link(&target_path)?, source_path);

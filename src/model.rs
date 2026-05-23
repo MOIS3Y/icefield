@@ -7,14 +7,12 @@ use std::path::PathBuf;
 pub struct CommonMeta {
     pub name: String,
     pub target: PathBuf,
-    #[allow(dead_code)]
     pub sudo: Option<bool>,
-    #[allow(dead_code)]
     pub owner: Option<String>,
-    #[allow(dead_code)]
     pub group: Option<String>,
     pub mode: Option<u32>,
     pub executable: Option<bool>,
+    pub force: Option<bool>,
 }
 
 /// Specific data depending on the chosen constructor.
