@@ -165,7 +165,34 @@ impl Applier {
             path
         );
 
-        let temp_file = tempfile::NamedTempFile::new()?;
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+
+        // Ensure parent exists before creating temp file in it
+        if !parent.exists() {
+            if use_sudo {
+                let tool = self.get_elevation_tool().ok_or_else(|| {
+                    anyhow!("Elevation requested but no elevation tool found")
+                })?;
+                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
+            } else {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        // Determine where to create the temporary file.
+        // - If standard write: create in the target directory
+        //   to avoid cross-device link errors during `persist` (rename).
+        // - If elevated write: create in the global OS temp dir (/tmp).
+        //   We don't have write access to the target dir, and `sudo cp`
+        //   handles cross-device copying perfectly fine.
+        let temp_file = if use_sudo {
+            tempfile::NamedTempFile::new()?
+        } else {
+            tempfile::Builder::new()
+                .prefix(".icefield-tmp-")
+                .tempfile_in(parent)?
+        };
+
         fs::write(temp_file.path(), content)?;
 
         if use_sudo {
@@ -187,10 +214,6 @@ impl Applier {
         let tool = self.get_elevation_tool().ok_or_else(|| {
             anyhow!("Elevation requested but no elevation tool found")
         })?;
-
-        if let Some(parent) = dest_path.parent().filter(|p| !p.exists()) {
-            duct::cmd!(tool, "mkdir", "-p", parent).run()?;
-        }
 
         duct::cmd!(tool, "cp", temp_path, dest_path).run()?;
         self.apply_ownership_elevated(tool, dest_path, meta)?;
@@ -244,9 +267,6 @@ impl Applier {
         dest_path: &PathBuf,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        if let Some(parent) = dest_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         temp_file.persist(dest_path).map_err(|e| anyhow!(e))?;
 
         #[cfg(unix)]
@@ -271,7 +291,12 @@ impl Applier {
     ) -> Result<()> {
         let use_sudo = meta.sudo.unwrap_or(false);
 
-        if !is_forced && self.is_symlink_correct(target, source)? {
+        // Convert the source to an absolute path to ensure the symlink is valid
+        // regardless of where it is created.
+        let absolute_source =
+            std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
+
+        if !is_forced && self.is_symlink_correct(target, &absolute_source)? {
             debug!("Symlink already correct: {:?}", target);
             return Ok(());
         }
@@ -282,13 +307,13 @@ impl Applier {
             "Linking{}: {:?} -> {:?}",
             if use_sudo { " (elevated)" } else { "" },
             target,
-            source
+            absolute_source
         );
 
         if use_sudo {
-            self.create_symlink_elevated(target, source)?;
+            self.create_symlink_elevated(target, &absolute_source)?;
         } else {
-            self.create_symlink_standard(target, source)?;
+            self.create_symlink_standard(target, &absolute_source)?;
         }
 
         Ok(())

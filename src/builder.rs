@@ -76,6 +76,9 @@ impl Builder {
 
     /// Generates an INI file content using the `rust-ini` crate.
     ///
+    /// The sections and keys are sorted alphabetically to ensure deterministic output,
+    /// which is crucial for hash-based change detection.
+    ///
     /// # Errors
     ///
     /// Returns an error if the INI structure cannot be serialized or
@@ -85,11 +88,24 @@ impl Builder {
     ) -> Result<String> {
         tracing::debug!("Building INI from {} sections", source.len());
         let mut ini = ini::Ini::new();
-        for (section, params) in source {
-            for (k, v) in params {
-                ini.with_section(Some(section)).set(k, v);
+
+        // Sort sections for determinism
+        let mut sections: Vec<&String> = source.keys().collect();
+        sections.sort();
+
+        for section in sections {
+            let params = source.get(section).unwrap();
+
+            // Sort keys within section for determinism
+            let mut keys: Vec<&String> = params.keys().collect();
+            keys.sort();
+
+            for k in keys {
+                ini.with_section(Some(section))
+                    .set(k, params.get(k).unwrap());
             }
         }
+
         let mut buffer = Vec::new();
         ini.write_to(&mut buffer).context("Failed to write INI")?;
         String::from_utf8(buffer).context("INI output is not UTF-8")

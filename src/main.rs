@@ -58,10 +58,12 @@ fn main() -> anyhow::Result<()> {
 
             // Phase 1: Compute Graph (Lua)
             let script = std::fs::read_to_string(&config_path)?;
-            let engine =
-                LuaEngine::new().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config_dir =
+                config_path.parent().unwrap_or(std::path::Path::new(""));
+            let engine = LuaEngine::new(config_dir)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let derivations = engine
-                .execute(&script)
+                .execute(&script, &config_path.to_string_lossy())
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             if dry_run {
