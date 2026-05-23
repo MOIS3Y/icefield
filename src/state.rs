@@ -53,7 +53,7 @@ mod tests {
         let mut state = State::default();
         state
             .managed_files
-            .insert(PathBuf::from("/tmp/test.conf"), "hash123".to_string());
+            .insert(PathBuf::from("config/test.conf"), "hash123".to_string());
 
         // Save
         state.save(&state_path)?;
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn test_load_non_existent_state() -> anyhow::Result<()> {
-        let path = PathBuf::from("/non/existent/path/state.json");
+        let path = PathBuf::from("path/to/nothing/state.json");
         let state = State::load(&path)?;
         assert!(state.managed_files.is_empty());
         Ok(())
