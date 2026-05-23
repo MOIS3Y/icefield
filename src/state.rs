@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -10,7 +10,8 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
 pub struct State {
     /// Mapping of target file paths to their SHA-256 hashes or symlink info.
-    pub managed_files: HashMap<PathBuf, String>,
+    /// Uses BTreeMap to ensure deterministic, sorted JSON output.
+    pub managed_files: BTreeMap<PathBuf, String>,
 }
 
 impl State {
