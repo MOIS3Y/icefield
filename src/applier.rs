@@ -9,6 +9,8 @@ use crate::model::{Derivation, DerivationKind};
 use crate::state::State;
 use crate::utils::hash_content;
 use anyhow::{Context, Result, anyhow};
+use console::style;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -23,6 +25,13 @@ use tracing::{debug, info, warn};
 pub struct Applier {
     /// Path to the JSON file storing the state of managed configurations.
     state_path: PathBuf,
+}
+
+#[derive(Debug, PartialEq)]
+enum ChangeKind {
+    Created,
+    Updated,
+    None,
 }
 
 impl Applier {
@@ -50,13 +59,33 @@ impl Applier {
         derivations: &[Derivation],
         global_force: bool,
     ) -> Result<()> {
-        info!("Applying configuration...");
+        println!(
+            "{} {}",
+            style("❄").blue(),
+            style("Applying configuration").bold()
+        );
+
         let current_state = State::load(&self.state_path)?;
         let mut new_state = State::default();
         let mut seen_targets = HashSet::new();
 
+        let pb = ProgressBar::new(derivations.len() as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template(
+                    "{prefix:.bold} [{bar:40.blue/white}] {pos}/{len} {msg}",
+                )?
+                .progress_chars("=> "),
+        );
+        pb.set_prefix("  Apply");
+
+        let mut created = 0;
+        let mut updated = 0;
+        let mut skipped = 0;
+
         for der in derivations {
             let target = &der.meta.target;
+            pb.set_message(format!("processing {}", der.meta.name));
 
             if !seen_targets.insert(target.clone()) {
                 anyhow::bail!("Duplicate target path: {:?}", target);
@@ -66,12 +95,16 @@ impl Applier {
 
             match &der.kind {
                 DerivationKind::Symlink { source_path } => {
-                    self.apply_symlink(
+                    match self.apply_symlink(
                         target,
                         source_path,
                         &der.meta,
                         is_forced,
-                    )?;
+                    )? {
+                        ChangeKind::Created => created += 1,
+                        ChangeKind::Updated => updated += 1,
+                        ChangeKind::None => skipped += 1,
+                    }
                     new_state.managed_files.insert(
                         target.clone(),
                         format!("symlink:{}", source_path.display()),
@@ -81,25 +114,42 @@ impl Applier {
                     let content = Builder::build(der)?;
                     let hash = hash_content(&content);
 
-                    if is_forced
-                        || current_state.managed_files.get(target)
-                            != Some(&hash)
-                        || !target.exists()
-                    {
+                    let exists_on_disk = target.exists();
+                    let hash_changed =
+                        current_state.managed_files.get(target) != Some(&hash);
+
+                    if is_forced || hash_changed || !exists_on_disk {
                         self.write_file(target, &content, &der.meta)?;
+                        if exists_on_disk {
+                            updated += 1;
+                        } else {
+                            created += 1;
+                        }
                     } else {
                         debug!("Skipping unchanged file: {:?}", target);
+                        skipped += 1;
                     }
 
                     new_state.managed_files.insert(target.clone(), hash);
                 }
             }
+            pb.inc(1);
         }
+        pb.finish_and_clear();
 
-        self.garbage_collect(&current_state, &seen_targets)?;
+        let removed = self.garbage_collect(&current_state, &seen_targets)?;
 
         new_state.save(&self.state_path)?;
-        info!("Apply finished successfully.");
+
+        println!(
+            "  {} Finished: {} created, {} updated, {} skipped, {} removed",
+            style("✓").green(),
+            style(created).green(),
+            style(updated).cyan(),
+            style(skipped).dim(),
+            style(removed).yellow()
+        );
+
         Ok(())
     }
 
@@ -109,7 +159,12 @@ impl Applier {
     /// from the provided list of derivations, removes them from the filesystem,
     /// and updates the state database.
     pub fn gc(&self, derivations: &[Derivation]) -> Result<()> {
-        info!("Running garbage collection...");
+        println!(
+            "{} {}",
+            style("🧹").yellow(),
+            style("Running garbage collection").bold()
+        );
+
         let current_state = State::load(&self.state_path)?;
         let mut seen_targets = HashSet::new();
 
@@ -118,7 +173,7 @@ impl Applier {
         }
 
         // Remove orphaned files from disk
-        self.garbage_collect(&current_state, &seen_targets)?;
+        let removed = self.garbage_collect(&current_state, &seen_targets)?;
 
         // Create a new state containing only the files that were NOT orphans
         let mut new_state = State::default();
@@ -129,7 +184,13 @@ impl Applier {
         }
 
         new_state.save(&self.state_path)?;
-        info!("Garbage collection finished successfully.");
+
+        println!(
+            "  {} Finished: {} orphaned files removed",
+            style("✓").green(),
+            style(removed).yellow()
+        );
+
         Ok(())
     }
 
@@ -140,7 +201,8 @@ impl Applier {
         &self,
         current_state: &State,
         seen_targets: &HashSet<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let mut removed_count = 0;
         for path in current_state.managed_files.keys() {
             if seen_targets.contains(path) {
                 continue;
@@ -160,8 +222,9 @@ impl Applier {
                     });
                 }
             }
+            removed_count += 1;
         }
-        Ok(())
+        Ok(removed_count)
     }
 
     /// Removes a file using the detected elevation tool (sudo/doas).
@@ -179,7 +242,7 @@ impl Applier {
         Ok(())
     }
 
-    /// Writes content to a file, handling elevation if requested or required.
+    /// Dispatches file writing to standard or elevated handlers based on metadata.
     fn write_file(
         &self,
         path: &PathBuf,
@@ -189,7 +252,8 @@ impl Applier {
         let use_sudo = meta.sudo.unwrap_or(false)
             || meta.owner.is_some()
             || meta.group.is_some();
-        info!(
+
+        debug!(
             "Writing{}: {:?}",
             if use_sudo { " (elevated)" } else { "" },
             path
@@ -312,13 +376,15 @@ impl Applier {
     }
 
     /// Dispatches symlink creation to standard or elevated handlers.
+    ///
+    /// Returns the kind of change performed.
     fn apply_symlink(
         &self,
         target: &PathBuf,
         source: &PathBuf,
         meta: &crate::model::CommonMeta,
         is_forced: bool,
-    ) -> Result<()> {
+    ) -> Result<ChangeKind> {
         let use_sudo = meta.sudo.unwrap_or(false);
 
         // Convert the source to an absolute path to ensure the symlink is valid
@@ -326,9 +392,12 @@ impl Applier {
         let absolute_source =
             std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
 
+        let exists_on_disk =
+            target.exists() || fs::symlink_metadata(target).is_ok();
+
         if !is_forced && self.is_symlink_correct(target, &absolute_source)? {
             debug!("Symlink already correct: {:?}", target);
-            return Ok(());
+            return Ok(ChangeKind::None);
         }
 
         self.remove_target_if_exists(target, use_sudo)?;
@@ -346,7 +415,11 @@ impl Applier {
             self.create_symlink_standard(target, &absolute_source)?;
         }
 
-        Ok(())
+        if exists_on_disk {
+            Ok(ChangeKind::Updated)
+        } else {
+            Ok(ChangeKind::Created)
+        }
     }
 
     /// Checks if a symlink exists at the target path and points to the correct source.

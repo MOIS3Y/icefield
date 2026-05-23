@@ -20,6 +20,7 @@ mod utils;
 use applier::Applier;
 use clap::Parser;
 use cli::{Cli, Commands};
+use console::style;
 use lua_engine::LuaEngine;
 
 /// Application entry point.
@@ -29,26 +30,37 @@ use lua_engine::LuaEngine;
 fn main() -> anyhow::Result<()> {
     // Phase 0: Initialization
     let cli = Cli::parse();
-    logging::setup(cli.verbose);
 
-    let (default_config_dir, default_state_path) = paths::get_default_paths();
+    let (default_config_dir, default_state_path, default_cache_dir) =
+        paths::get_default_paths();
+
     let config_path = cli
         .config
-        .unwrap_or_else(|| default_config_dir.join("init.lua"));
+        .unwrap_or_else(|| default_config_dir.join(paths::CONFIG_FILE));
     let state_path = cli.state.unwrap_or(default_state_path);
+    let log_dir = state_path.parent().unwrap_or(&default_cache_dir);
+
+    // Initialize logging (logs go to icefield.log in the same dir as state)
+    let _log_guard = logging::setup(cli.verbose, log_dir);
 
     // Command dispatching
     match cli.command {
         Commands::Apply { dry_run, force } => {
             if dry_run {
-                tracing::info!(
-                    "Dry run mode enabled. No changes will be made."
+                println!(
+                    "{} {}",
+                    style("❄").blue(),
+                    style("Dry run mode enabled. No changes will be made.")
+                        .dim()
                 );
             }
 
             if force {
-                tracing::warn!(
-                    "Force mode enabled. Cache optimization will be bypassed."
+                println!(
+                    "{} {}",
+                    style("!").yellow(),
+                    style("Force mode enabled. Cache optimization will be bypassed.")
+                        .yellow()
                 );
             }
 
@@ -57,7 +69,11 @@ fn main() -> anyhow::Result<()> {
             if dry_run {
                 // Phase 2: Build (in-memory simulation for dry run)
                 for der in derivations {
-                    tracing::info!("Would apply: {}", der.meta.name);
+                    println!(
+                        "  {} {}",
+                        style("🔨").dim(),
+                        style(&der.meta.name).dim()
+                    );
                 }
             } else {
                 // Phase 2 & 3: Build and Commit
@@ -73,9 +89,18 @@ fn main() -> anyhow::Result<()> {
         Commands::Status => {
             // Displays the current state of managed files from state.json
             let state = state::State::load(&state_path)?;
-            tracing::info!("Managed files: {}", state.managed_files.len());
+            println!(
+                "{} Found {} managed files",
+                style("❄").blue(),
+                style(state.managed_files.len()).bold()
+            );
             for (path, hash) in state.managed_files {
-                tracing::info!("  {:?} [{}]", path, hash);
+                println!(
+                    "  {} {} {}",
+                    style("•").dim(),
+                    style(path.display()).cyan(),
+                    style(format!("[{}]", &hash[..8])).dim()
+                );
             }
         }
     }

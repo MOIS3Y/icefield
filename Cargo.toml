@@ -12,9 +12,11 @@ keywords = ["dotfiles", "declarative", "lua", "manager"]
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
+console = "0.16.3"
 directories = "6.0.0"
 duct = "1.1.1"
 grass = "0.13.4"
+indicatif = "0.18.4"
 mlua = { version = "0.11.6", features = ["lua54", "serialize"] }
 rust-ini = "0.21.3"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -25,5 +27,6 @@ tempfile = "3.27.0"
 tera = "1.20.1"
 toml = "1.1.2"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+tracing-appender = "0.2.5"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time", "time"] }
 which = "8.0.2"
