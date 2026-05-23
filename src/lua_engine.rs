@@ -33,7 +33,77 @@ impl LuaEngine {
         package.set("path", path)?;
 
         Self::register_constructors(&lua)?;
+        Self::register_icefield_api(&lua, config_dir)?;
+        Self::register_lua_helpers(&lua)?;
+
         Ok(Self { lua })
+    }
+
+    /// Registers the `icefield` global table and its functions.
+    fn register_icefield_api(
+        lua: &Lua,
+        config_dir: &std::path::Path,
+    ) -> Result<()> {
+        let icefield = lua.create_table()?;
+        let config_dir = config_dir.to_path_buf();
+
+        // icefield.run_command(cmd, args)
+        // Runs an external command, captures stdout, and inherits stdin/stderr.
+        let run_command = lua.create_function(
+            move |_, (cmd, args): (String, Vec<String>)| {
+                use console::style;
+
+                println!(
+                    "  {} {} {}",
+                    style("➜").blue(),
+                    style("Running:").dim(),
+                    style(format!("{} {}", cmd, args.join(" "))).italic()
+                );
+
+                let result = duct::cmd(cmd.clone(), args)
+                    .dir(&config_dir)
+                    .stdout_capture()
+                    .unchecked()
+                    .run();
+
+                match result {
+                    Ok(output) => {
+                        if output.status.success() {
+                            let stdout =
+                                String::from_utf8_lossy(&output.stdout)
+                                    .into_owned();
+                            Ok(stdout)
+                        } else {
+                            Err(mlua::Error::RuntimeError(format!(
+                                "Command failed with exit code {}: {}",
+                                output.status.code().unwrap_or(-1),
+                                cmd
+                            )))
+                        }
+                    }
+                    Err(e) => Err(mlua::Error::RuntimeError(format!(
+                        "Failed to execute command: {}",
+                        e
+                    ))),
+                }
+            },
+        )?;
+
+        icefield.set("run_command", run_command)?;
+        lua.globals().set("icefield", icefield)?;
+        Ok(())
+    }
+
+    /// Registers useful Lua helper functions (like string trimming).
+    fn register_lua_helpers(lua: &Lua) -> Result<()> {
+        // Add :trim() method to all strings
+        let trim_script = r#"
+            function string.trim(s)
+                return s:match("^%s*(.-)%s*$")
+            end
+        "#;
+        lua.load(trim_script).exec()?;
+        Ok(())
     }
 
     /// Registers `mk*Derivation` functions in the Lua global scope.

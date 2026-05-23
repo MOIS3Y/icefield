@@ -64,24 +64,24 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
+            println!(
+                "{} {}",
+                style("❄").blue(),
+                style("Computing configuration").bold()
+            );
+
             let derivations = LuaEngine::load_file(&config_path)?;
 
-            if dry_run {
-                // Phase 2: Build (in-memory simulation for dry run)
-                for der in derivations {
-                    println!(
-                        "  {} {}",
-                        style("🔨").dim(),
-                        style(&der.meta.name).dim()
-                    );
-                }
-            } else {
-                // Phase 2 & 3: Build and Commit
-                let applier = Applier::new(state_path);
-                applier.apply(&derivations, force)?;
-            }
+            // Phase 2 & 3: Build and Commit
+            let applier = Applier::new(state_path);
+            applier.apply(&derivations, force)?;
         }
         Commands::Gc => {
+            println!(
+                "{} {}",
+                style("❄").blue(),
+                style("Computing configuration").bold()
+            );
             let derivations = LuaEngine::load_file(&config_path)?;
             let applier = Applier::new(state_path);
             applier.gc(&derivations)?;
