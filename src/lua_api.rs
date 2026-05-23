@@ -4,7 +4,7 @@
 //! exposed to the user's Lua configuration via the global `icefield` table.
 //! It includes tools for path expansion, command execution, and system inspection.
 
-use mlua::{Lua, Result};
+use mlua::{Lua, LuaSerdeExt, Result};
 use std::path::Path;
 
 /// Registers the `icefield` global table and all its helper functions.
@@ -44,7 +44,61 @@ pub fn register(lua: &Lua, config_dir: &Path) -> Result<()> {
         lua.create_function(|_, path: String| Ok(path_expand(&path)))?,
     )?;
 
-    // 4. icefield.run_command(cmd, args)
+    // 4. Data handling (Serialization/Deserialization)
+    icefield.set(
+        "from_json",
+        lua.create_function(|lua, s: String| {
+            let v = parse_json(&s)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            lua.to_value(&v)
+        })?,
+    )?;
+
+    icefield.set(
+        "to_json",
+        lua.create_function(|lua, t: mlua::Value| {
+            let v: serde_json::Value = lua.from_value(t)?;
+            Ok(serialize_json(&v))
+        })?,
+    )?;
+
+    icefield.set(
+        "from_toml",
+        lua.create_function(|lua, s: String| {
+            let v = parse_toml(&s)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            lua.to_value(&v)
+        })?,
+    )?;
+
+    icefield.set(
+        "to_toml",
+        lua.create_function(|lua, t: mlua::Value| {
+            let v: serde_json::Value = lua.from_value(t)?;
+            serialize_toml(&v)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    icefield.set(
+        "from_yaml",
+        lua.create_function(|lua, s: String| {
+            let v = parse_yaml(&s)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            lua.to_value(&v)
+        })?,
+    )?;
+
+    icefield.set(
+        "to_yaml",
+        lua.create_function(|lua, t: mlua::Value| {
+            let v: serde_json::Value = lua.from_value(t)?;
+            serialize_yaml(&v)
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
+        })?,
+    )?;
+
+    // 5. icefield.run_command(cmd, args)
     let run_cmd_dir = config_dir.to_path_buf();
     icefield.set(
         "run_command",
@@ -113,6 +167,40 @@ pub fn path_expand(path: &str) -> String {
     shellexpand::full(path)
         .map(|s| s.into_owned())
         .unwrap_or_else(|_| path.to_string())
+}
+
+/// Parses a JSON string into a `serde_json::Value`.
+pub fn parse_json(s: &str) -> anyhow::Result<serde_json::Value> {
+    serde_json::from_str(s)
+        .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))
+}
+
+/// Serializes a `serde_json::Value` into a pretty-printed JSON string.
+pub fn serialize_json(v: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(v).unwrap_or_default()
+}
+
+/// Parses a TOML string into a `serde_json::Value`.
+pub fn parse_toml(s: &str) -> anyhow::Result<serde_json::Value> {
+    toml::from_str(s).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))
+}
+
+/// Serializes a `serde_json::Value` into a TOML string.
+pub fn serialize_toml(v: &serde_json::Value) -> anyhow::Result<String> {
+    toml::to_string(v)
+        .map_err(|e| anyhow::anyhow!("TOML serialize error: {}", e))
+}
+
+/// Parses a YAML string into a `serde_json::Value`.
+pub fn parse_yaml(s: &str) -> anyhow::Result<serde_json::Value> {
+    serde_yaml::from_str(s)
+        .map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))
+}
+
+/// Serializes a `serde_json::Value` into a YAML string.
+pub fn serialize_yaml(v: &serde_json::Value) -> anyhow::Result<String> {
+    serde_yaml::to_string(v)
+        .map_err(|e| anyhow::anyhow!("YAML serialize error: {}", e))
 }
 
 /// Executes an external command, captures its stdout, and returns it.
@@ -189,5 +277,29 @@ mod tests {
     fn test_has_command() {
         assert!(has_command("ls"));
         assert!(!has_command("non-existent-command-xyz"));
+    }
+
+    #[test]
+    fn test_json_helpers() {
+        let json = r#"{"foo": "bar"}"#;
+        let v = parse_json(json).unwrap();
+        assert_eq!(v["foo"], "bar");
+        assert!(serialize_json(&v).contains("\"foo\": \"bar\""));
+    }
+
+    #[test]
+    fn test_toml_helpers() {
+        let toml = "foo = \"bar\"";
+        let v = parse_toml(toml).unwrap();
+        assert_eq!(v["foo"], "bar");
+        assert_eq!(serialize_toml(&v).unwrap().trim(), "foo = \"bar\"");
+    }
+
+    #[test]
+    fn test_yaml_helpers() {
+        let yaml = "foo: bar";
+        let v = parse_yaml(yaml).unwrap();
+        assert_eq!(v["foo"], "bar");
+        assert_eq!(serialize_yaml(&v).unwrap().trim(), "foo: bar");
     }
 }
