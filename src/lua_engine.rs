@@ -65,6 +65,7 @@ impl LuaEngine {
             ("mkScssDerivation", "scss"),
             ("mkTemplateDerivation", "template"),
             ("mkTextDerivation", "text"),
+            ("mkCopyDerivation", "copy"),
         ];
 
         for (func_name, kind_tag) in kinds {

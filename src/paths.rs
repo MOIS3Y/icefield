@@ -1,3 +1,9 @@
+//! Path resolution and project directory management.
+//!
+//! This module provides utilities for determining standard OS-specific
+//! directories for configuration, cache, and state files, following platform
+//! conventions (XDG on Linux, Apple guidelines on macOS).
+
 use directories::ProjectDirs;
 use std::path::PathBuf;
 

@@ -1,3 +1,9 @@
+//! State management and persistence.
+//!
+//! This module handles the `state.json` database, which tracks the files
+//! managed by Icefield and their integrity hashes. This state is crucial for
+//! performing incremental updates and safe garbage collection.
+
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;

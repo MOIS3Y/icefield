@@ -1,3 +1,10 @@
+//! Phase 2: Build.
+//!
+//! This module implements the sandbox builder responsible for transforming
+//! derivations into their final string representations (serialization,
+//! template rendering, SCSS compilation). All build operations are performed
+//! in memory to ensure atomicity.
+
 use crate::model::{Derivation, DerivationKind};
 use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
@@ -45,6 +52,7 @@ impl Builder {
                 variables,
             } => Self::build_template(template_path, variables),
             DerivationKind::Text { source } => Ok(source.clone()),
+            DerivationKind::Copy { .. } => Ok(String::new()),
         }?;
 
         tracing::debug!(

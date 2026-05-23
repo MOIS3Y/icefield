@@ -7,13 +7,13 @@
 use crate::builder::Builder;
 use crate::model::{Derivation, DerivationKind};
 use crate::state::State;
-use crate::utils::hash_content;
+use crate::utils::{hash_content, hash_file};
 use anyhow::{Context, Result, anyhow};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Synchronizes the desired configuration state with the filesystem.
@@ -109,6 +109,25 @@ impl Applier {
                         target.clone(),
                         format!("symlink:{}", source_path.display()),
                     );
+                }
+                DerivationKind::Copy { source_path } => {
+                    let hash = hash_file(source_path)?;
+                    let exists_on_disk = target.exists();
+                    let hash_changed =
+                        current_state.managed_files.get(target) != Some(&hash);
+
+                    if is_forced || hash_changed || !exists_on_disk {
+                        self.copy_file(source_path, target, &der.meta)?;
+                        if exists_on_disk {
+                            updated += 1;
+                        } else {
+                            created += 1;
+                        }
+                    } else {
+                        debug!("Skipping unchanged file: {:?}", target);
+                        skipped += 1;
+                    }
+                    new_state.managed_files.insert(target.clone(), hash);
                 }
                 _ => {
                     let content = Builder::build(der)?;
@@ -242,6 +261,73 @@ impl Applier {
         Ok(())
     }
 
+    /// Copies a file from source to target, handling elevation and atomicity.
+    fn copy_file(
+        &self,
+        source: &PathBuf,
+        target: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        let use_sudo = meta.sudo.unwrap_or(false)
+            || meta.owner.is_some()
+            || meta.group.is_some();
+
+        info!(
+            "Copying{}: {:?} -> {:?}",
+            if use_sudo { " (elevated)" } else { "" },
+            source,
+            target
+        );
+
+        let parent = target.parent().unwrap_or_else(|| Path::new(""));
+
+        if !parent.exists() {
+            if use_sudo {
+                let tool = self.get_elevation_tool().ok_or_else(|| {
+                    anyhow!("Elevation requested but no elevation tool found")
+                })?;
+                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
+            } else {
+                fs::create_dir_all(parent)?;
+            }
+        }
+
+        if use_sudo {
+            let tool = self.get_elevation_tool().ok_or_else(|| {
+                anyhow!("Elevation requested but no elevation tool found")
+            })?;
+            duct::cmd!(tool, "cp", source, target).run()?;
+            self.apply_ownership_elevated(tool, target, meta)?;
+            self.apply_permissions_elevated(tool, target, meta)?;
+        } else {
+            // Standard copy. Note: fs::copy is not atomic, so we use a temp file in the same dir.
+            let temp_file = tempfile::Builder::new()
+                .prefix(".icefield-tmp-")
+                .tempfile_in(parent)?;
+
+            fs::copy(source, temp_file.path())?;
+
+            // Copy permissions from meta if provided, or preserve from source?
+            // For managers, explicit is better.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut mode = meta.mode.unwrap_or(0o644);
+                if meta.executable.unwrap_or(false) {
+                    mode |= 0o111;
+                }
+                fs::set_permissions(
+                    temp_file.path(),
+                    fs::Permissions::from_mode(mode),
+                )?;
+            }
+
+            temp_file.persist(target).map_err(|e| anyhow!(e))?;
+        }
+
+        Ok(())
+    }
+
     /// Dispatches file writing to standard or elevated handlers based on metadata.
     fn write_file(
         &self,
@@ -259,7 +345,7 @@ impl Applier {
             path
         );
 
-        let parent = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
 
         // Ensure parent exists before creating temp file in it
         if !parent.exists() {
@@ -301,7 +387,7 @@ impl Applier {
     /// Copies a temporary file to its final destination using elevated privileges.
     fn write_elevated(
         &self,
-        temp_path: &std::path::Path,
+        temp_path: &Path,
         dest_path: &PathBuf,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
@@ -493,7 +579,6 @@ impl Applier {
 mod tests {
     use super::*;
     use crate::model::CommonMeta;
-    use serde_json::json;
     use tempfile::tempdir;
 
     fn mock_meta(target: PathBuf) -> CommonMeta {
@@ -518,15 +603,15 @@ mod tests {
         let applier = Applier::new(state_path.clone());
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
-            kind: DerivationKind::Toml {
-                source: json!({ "foo": "bar" }),
+            kind: DerivationKind::Text {
+                source: "hello".to_string(),
             },
         }];
 
         applier.apply(&derivations, false)?;
 
         assert!(target_path.exists());
-        assert_eq!(fs::read_to_string(&target_path)?, "foo = \"bar\"\n");
+        assert_eq!(fs::read_to_string(&target_path)?, "hello");
 
         let state = State::load(&state_path)?;
         assert!(state.managed_files.contains_key(&target_path));

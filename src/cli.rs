@@ -1,3 +1,9 @@
+//! Command-line interface definition.
+//!
+//! This module defines the CLI structure using `clap`, including global
+//! flags and subcommands for applying configurations, garbage collection,
+//! and status inspection.
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 

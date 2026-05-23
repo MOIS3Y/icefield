@@ -1,3 +1,9 @@
+//! Audit logging and diagnostics.
+//!
+//! This module implements the file-based logging system that records detailed
+//! execution information for auditing and troubleshooting, while keeping the
+//! main console output clean and professional.
+
 use std::path::Path;
 use tracing::Level;
 use tracing_subscriber::fmt;
