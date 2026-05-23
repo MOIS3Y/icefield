@@ -40,6 +40,16 @@ impl Applier {
         Self { state_path }
     }
 
+    /// Determines if a derivation requires privilege elevation.
+    ///
+    /// Elevation is required if `sudo` is true, or if a specific `owner` or
+    /// `group` is requested.
+    fn needs_elevation(&self, meta: &crate::model::CommonMeta) -> bool {
+        meta.sudo.unwrap_or(false)
+            || meta.owner.is_some()
+            || meta.group.is_some()
+    }
+
     /// Detects the available privilege elevation tool.
     ///
     /// Currently supports `sudo` and `doas`. Returns `None` if neither is found.
@@ -268,9 +278,7 @@ impl Applier {
         target: &PathBuf,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        let use_sudo = meta.sudo.unwrap_or(false)
-            || meta.owner.is_some()
-            || meta.group.is_some();
+        let use_sudo = self.needs_elevation(meta);
 
         info!(
             "Copying{}: {:?} -> {:?}",
@@ -336,9 +344,7 @@ impl Applier {
         content: &str,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        let use_sudo = meta.sudo.unwrap_or(false)
-            || meta.owner.is_some()
-            || meta.group.is_some();
+        let use_sudo = self.needs_elevation(meta);
 
         debug!(
             "Writing{}: {:?}",
@@ -471,7 +477,7 @@ impl Applier {
         meta: &crate::model::CommonMeta,
         is_forced: bool,
     ) -> Result<ChangeKind> {
-        let use_sudo = meta.sudo.unwrap_or(false);
+        let use_sudo = self.needs_elevation(meta);
 
         // Convert the source to an absolute path to ensure the symlink is valid
         // regardless of where it is created.
@@ -496,9 +502,26 @@ impl Applier {
         );
 
         if use_sudo {
-            self.create_symlink_elevated(target, &absolute_source)?;
+            let tool = self.get_elevation_tool().ok_or_else(|| {
+                anyhow!("Elevation requested but no elevation tool found")
+            })?;
+            if let Some(parent) = target.parent().filter(|p| !p.exists()) {
+                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
+            }
+            duct::cmd!(tool, "ln", "-sf", &absolute_source, target).run()?;
+
+            // Apply ownership and permissions to the symlink itself if elevated
+            self.apply_ownership_elevated_link(tool, target, meta)?;
         } else {
-            self.create_symlink_standard(target, &absolute_source)?;
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&absolute_source, target)?;
+            #[cfg(not(unix))]
+            return Err(anyhow::anyhow!(
+                "Symlinks are only supported on Unix"
+            ));
         }
 
         if exists_on_disk {
@@ -506,6 +529,27 @@ impl Applier {
         } else {
             Ok(ChangeKind::Created)
         }
+    }
+
+    /// Applies ownership changes to a symbolic link itself using -h flag.
+    fn apply_ownership_elevated_link(
+        &self,
+        tool: &str,
+        path: &PathBuf,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        if let Some(owner) = &meta.owner {
+            let group = meta.group.as_deref().unwrap_or("");
+            let spec = if group.is_empty() {
+                owner.clone()
+            } else {
+                format!("{}:{}", owner, group)
+            };
+            duct::cmd!(tool, "chown", "-h", spec, path).run()?;
+        } else if let Some(group) = &meta.group {
+            duct::cmd!(tool, "chgrp", "-h", group, path).run()?;
+        }
+        Ok(())
     }
 
     /// Checks if a symlink exists at the target path and points to the correct source.
@@ -539,38 +583,6 @@ impl Applier {
                 fs::remove_file(target)?;
             }
         }
-        Ok(())
-    }
-
-    /// Creates a symlink using an elevation tool, ensuring the parent directory exists.
-    fn create_symlink_elevated(
-        &self,
-        target: &PathBuf,
-        source: &PathBuf,
-    ) -> Result<()> {
-        let tool = self
-            .get_elevation_tool()
-            .ok_or_else(|| anyhow!("No elevation tool found"))?;
-        if let Some(parent) = target.parent().filter(|p| !p.exists()) {
-            duct::cmd!(tool, "mkdir", "-p", parent).run()?;
-        }
-        duct::cmd!(tool, "ln", "-sf", source, target).run()?;
-        Ok(())
-    }
-
-    /// Creates a symlink with standard privileges, ensuring the parent directory exists.
-    fn create_symlink_standard(
-        &self,
-        target: &PathBuf,
-        source: &PathBuf,
-    ) -> Result<()> {
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(source, target)?;
-        #[cfg(not(unix))]
-        return Err(anyhow::anyhow!("Symlinks are only supported on Unix"));
         Ok(())
     }
 }
