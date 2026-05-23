@@ -175,12 +175,11 @@ mod tests {
         CommonMeta {
             name: "test".to_string(),
             target: PathBuf::from("dummy/path.txt"),
+            force: None,
             sudo: None,
             owner: None,
             group: None,
             mode: None,
-            executable: None,
-            force: None,
         }
     }
 

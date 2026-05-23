@@ -312,10 +312,11 @@ impl Applier {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut mode = meta.mode.unwrap_or(0o644);
-                if meta.executable.unwrap_or(false) {
-                    mode |= 0o111;
-                }
+                let mode_str = meta.mode.as_deref().unwrap_or("644");
+                let mode =
+                    u32::from_str_radix(mode_str, 8).with_context(|| {
+                        format!("Invalid octal mode string: {}", mode_str)
+                    })?;
                 fs::set_permissions(
                     temp_file.path(),
                     fs::Permissions::from_mode(mode),
@@ -430,13 +431,11 @@ impl Applier {
         path: &PathBuf,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        let mode = meta.mode.unwrap_or(0o644);
-        let final_mode = if meta.executable.unwrap_or(false) {
-            mode | 0o111
-        } else {
-            mode
-        };
-        duct::cmd!(tool, "chmod", format!("{:o}", final_mode), path).run()?;
+        let mode_str = meta.mode.as_deref().unwrap_or("644");
+        let mode = u32::from_str_radix(mode_str, 8).with_context(|| {
+            format!("Invalid octal mode string: {}", mode_str)
+        })?;
+        duct::cmd!(tool, "chmod", format!("{:o}", mode), path).run()?;
         Ok(())
     }
 
@@ -452,10 +451,11 @@ impl Applier {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut mode = meta.mode.unwrap_or(0o644);
-            if meta.executable.unwrap_or(false) {
-                mode |= 0o111;
-            }
+            let mode_str = meta.mode.as_deref().unwrap_or("644");
+            let mode =
+                u32::from_str_radix(mode_str, 8).with_context(|| {
+                    format!("Invalid octal mode string: {}", mode_str)
+                })?;
             fs::set_permissions(dest_path, fs::Permissions::from_mode(mode))?;
         }
         Ok(())
@@ -585,12 +585,11 @@ mod tests {
         CommonMeta {
             name: "test".to_string(),
             target,
+            force: None,
             sudo: None,
             owner: None,
             group: None,
             mode: None,
-            executable: None,
-            force: None,
         }
     }
 

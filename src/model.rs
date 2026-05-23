@@ -27,10 +27,8 @@ pub struct CommonMeta {
     pub owner: Option<String>,
     /// The system group that should own the file (requires `sudo`).
     pub group: Option<String>,
-    /// Unix file mode (permissions), e.g., 0o644.
-    pub mode: Option<u32>,
-    /// Shortcut to set the executable bit (mode | 0o111).
-    pub executable: Option<bool>,
+    /// Unix file mode (permissions) as an octal string, e.g., "0644" or "755".
+    pub mode: Option<String>,
 }
 
 /// Specific data depending on the chosen constructor.
