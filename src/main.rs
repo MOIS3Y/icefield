@@ -11,6 +11,7 @@ mod applier;
 mod builder;
 mod cli;
 mod logging;
+mod lua_api;
 mod lua_engine;
 mod model;
 mod paths;

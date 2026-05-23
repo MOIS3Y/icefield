@@ -1,3 +1,9 @@
+//! Phase 1: Compute.
+//!
+//! This module encapsulates the Lua runtime and is responsible for executing
+//! the user's configuration and transforming it into a list of Rust-native
+//! `Derivation` structures.
+
 use crate::model::Derivation;
 use anyhow::{Context, anyhow};
 use mlua::{Lua, LuaSerdeExt, Result, Table, Value};
@@ -12,11 +18,13 @@ pub struct LuaEngine {
 }
 
 impl LuaEngine {
-    /// Creates a new `LuaEngine` and initializes global constructors.
+    /// Creates a new `LuaEngine` and prepares the Lua environment.
     ///
-    /// The `config_dir` is used to resolve relative paths (like `source_path`
-    /// or `template_path`) relative to the location of the `init.lua` file,
-    /// rather than the user's current working directory.
+    /// This method:
+    /// 1. Initializes a new Lua state.
+    /// 2. Injects the `CONFIG_DIR` global variable.
+    /// 3. Configures `package.path` to allow `require` to find local modules.
+    /// 4. Registers derivation constructors and the system API.
     pub fn new(config_dir: &std::path::Path) -> Result<Self> {
         let lua = mlua::Lua::new();
 
@@ -33,98 +41,19 @@ impl LuaEngine {
         package.set("path", path)?;
 
         Self::register_constructors(&lua)?;
-        Self::register_icefield_api(&lua, config_dir)?;
-        Self::register_lua_helpers(&lua)?;
+        crate::lua_api::register(&lua, config_dir)?;
 
         Ok(Self { lua })
     }
 
-    /// Registers the `icefield` global table and its functions.
-    fn register_icefield_api(
-        lua: &Lua,
-        config_dir: &std::path::Path,
-    ) -> Result<()> {
-        let icefield = lua.create_table()?;
-        let config_dir = config_dir.to_path_buf();
-
-        // icefield.run_command(cmd, args)
-        // Runs an external command, captures stdout, and inherits stdin/stderr.
-        let run_command = lua.create_function(
-            move |_, (cmd, args): (String, Vec<String>)| {
-                use console::style;
-
-                println!(
-                    "  {} {} {}",
-                    style("➜").blue(),
-                    style("Running:").dim(),
-                    style(format!("{} {}", cmd, args.join(" "))).italic()
-                );
-
-                let result = duct::cmd(cmd.clone(), args)
-                    .dir(&config_dir)
-                    .stdout_capture()
-                    .unchecked()
-                    .run();
-
-                match result {
-                    Ok(output) => {
-                        if output.status.success() {
-                            let stdout =
-                                String::from_utf8_lossy(&output.stdout)
-                                    .into_owned();
-                            Ok(stdout)
-                        } else {
-                            Err(mlua::Error::RuntimeError(format!(
-                                "Command failed with exit code {}: {}",
-                                output.status.code().unwrap_or(-1),
-                                cmd
-                            )))
-                        }
-                    }
-                    Err(e) => Err(mlua::Error::RuntimeError(format!(
-                        "Failed to execute command: {}",
-                        e
-                    ))),
-                }
-            },
-        )?;
-
-        icefield.set("run_command", run_command)?;
-        lua.globals().set("icefield", icefield)?;
-        Ok(())
-    }
-
-    /// Registers useful Lua helper functions (like string trimming).
-    fn register_lua_helpers(lua: &Lua) -> Result<()> {
-        // Add :trim() method to all strings
-        let trim_script = r#"
-            function string.trim(s)
-                return s:match("^%s*(.-)%s*$")
-            end
-        "#;
-        lua.load(trim_script).exec()?;
-        Ok(())
-    }
-
-    /// Registers `mk*Derivation` functions in the Lua global scope.
+    /// Registers `mk*Derivation` constructors in the Lua global scope.
     ///
-    /// Each registered function takes a table, injects a `"type"` field
-    /// corresponding to the `DerivationKind`, and returns the table back.
-    /// It also resolves relative `template_path` and `source_path` against `CONFIG_DIR`.
+    /// These functions take a configuration table, inject a `"type"` field
+    /// used for Rust deserialization, and return the modified table.
+    /// All path resolution within these tables is now explicit and handled
+    /// by the user via the `icefield` API.
     fn register_constructors(lua: &Lua) -> Result<()> {
         let globals = lua.globals();
-
-        // Helper Lua function to resolve relative paths against the root config directory.
-        let resolve_path_script = r#"
-            function resolve_path(path)
-                -- If it's already an absolute path or relative to home, leave it alone
-                if type(path) == "string" and path:sub(1, 1) ~= "/" and path:sub(1, 2) ~= "~/" then
-                    return CONFIG_DIR .. "/" .. path
-                end
-                return path
-            end
-        "#;
-        lua.load(resolve_path_script).exec()?;
 
         let kinds = [
             ("mkTomlDerivation", "toml"),
@@ -139,29 +68,8 @@ impl LuaEngine {
         ];
 
         for (func_name, kind_tag) in kinds {
-            let func = lua.create_function(move |lua, args: Table| {
+            let func = lua.create_function(move |_, args: Table| {
                 args.set("type", kind_tag)?;
-
-                let resolve_path: mlua::Function =
-                    lua.globals().get("resolve_path")?;
-
-                if let Ok(template_path) =
-                    args.get::<mlua::Value>("template_path")
-                {
-                    args.set(
-                        "template_path",
-                        resolve_path.call::<mlua::Value>(template_path)?,
-                    )?;
-                }
-
-                if let Ok(source_path) = args.get::<mlua::Value>("source_path")
-                {
-                    args.set(
-                        "source_path",
-                        resolve_path.call::<mlua::Value>(source_path)?,
-                    )?;
-                }
-
                 Ok(args)
             })?;
             globals.set(func_name, func)?;
