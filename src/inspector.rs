@@ -4,6 +4,7 @@
 //! in `state.json` with the actual state of the filesystem, reporting any
 //! discrepancies (drift) to the user.
 
+use crate::paths;
 use crate::state::State;
 use crate::utils::hash_file;
 use anyhow::Result;
@@ -24,8 +25,9 @@ enum Status {
 /// Orchestrator entry point for the info command.
 ///
 /// Inspects the managed files and prints their drift status.
-pub fn inspect(state_path: &Path) -> Result<()> {
-    let state = State::load(&state_path.to_path_buf())?;
+pub fn inspect(paths: &paths::AppPaths) -> Result<()> {
+    let state_file = paths.state_file();
+    let state = State::load(&state_file)?;
 
     println!(
         "{} Icefield: System Configuration Status\nFound {} managed files:\n",

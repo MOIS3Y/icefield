@@ -4,6 +4,7 @@
 //! into a local store located in the application's cache directory.
 //! It ensures integrity by verifying SHA-256 hashes.
 
+use crate::paths;
 use crate::utils::hash_file;
 use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
@@ -20,9 +21,9 @@ pub struct Store {
 
 impl Store {
     /// Creates a new `Store` instance.
-    pub fn new(cache_dir: &Path) -> Self {
+    pub fn new(store_dir: &Path) -> Self {
         Self {
-            root: cache_dir.join(crate::paths::STORE_DIR),
+            root: store_dir.to_path_buf(),
         }
     }
 
@@ -47,10 +48,8 @@ impl Store {
 
     /// Ensures the store root directory exists.
     fn ensure_root(&self) -> Result<()> {
-        if !self.root.exists() {
-            fs::create_dir_all(&self.root)
-                .context("Failed to create store root")?;
-        }
+        paths::ensure_dir(&self.root)
+            .context("Failed to create store root")?;
         Ok(())
     }
 
@@ -166,7 +165,7 @@ impl Store {
 
         // Only create the final directory if the hash matches
         let base_dir = self.get_base_dir(expected_hash, &name);
-        fs::create_dir_all(&base_dir)?;
+        paths::ensure_dir(&base_dir)?;
         temp_file.persist(&target_path).map_err(|e| anyhow!(e))?;
         debug!("Stored artifact: {:?}", target_path);
         Ok(target_path)
@@ -215,7 +214,7 @@ impl Store {
         self.verify_hash(temp_archive.path(), expected_hash, "tarball", url)?;
 
         // Hash matched, create directory and move the archive
-        fs::create_dir_all(&base_dir)?;
+        paths::ensure_dir(&base_dir)?;
         let final_archive = base_dir.join("source.tar.gz");
         temp_archive
             .persist(&final_archive)
@@ -224,7 +223,7 @@ impl Store {
         if out_path.exists() {
             fs::remove_dir_all(&out_path)?;
         }
-        fs::create_dir_all(&out_path)?;
+        paths::ensure_dir(&out_path)?;
 
         debug!("Extracting tarball to: {:?}", out_path);
         let tar_gz = fs::File::open(&final_archive)?;
@@ -284,7 +283,7 @@ impl Store {
         self.verify_hash(temp_archive.path(), expected_hash, "ZIP", url)?;
 
         // Hash matched, create directory and move the archive
-        fs::create_dir_all(&base_dir)?;
+        paths::ensure_dir(&base_dir)?;
         let final_archive = base_dir.join("source.zip");
         temp_archive
             .persist(&final_archive)
@@ -293,7 +292,7 @@ impl Store {
         if out_path.exists() {
             fs::remove_dir_all(&out_path)?;
         }
-        fs::create_dir_all(&out_path)?;
+        paths::ensure_dir(&out_path)?;
 
         debug!("Extracting ZIP to: {:?}", out_path);
         let zip_file = fs::File::open(&final_archive)?;

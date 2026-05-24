@@ -14,10 +14,6 @@ pub struct Cli {
     #[arg(short, long, value_name = "FILE")]
     pub config: Option<PathBuf>,
 
-    /// Path to the state.json file
-    #[arg(short, long, value_name = "FILE")]
-    pub state: Option<PathBuf>,
-
     /// Increase logging verbosity (-v, -vv)
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,

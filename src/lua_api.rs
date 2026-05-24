@@ -13,7 +13,7 @@
 //! - `drv`: Derivation constructors (TOML, JSON, Copy, Symlink, etc.).
 //! - `lib`: High-level utility library containing helper functions for string
 //!   manipulation, table processing, hashing, and logic helpers.
-
+use crate::paths;
 use crate::store::Store;
 use mlua::{Lua, LuaSerdeExt, Result, Table};
 use std::path::Path;
@@ -26,7 +26,7 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a Lua error if table creation or registration fails.
-pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
+pub fn register(lua: &Lua, paths: &paths::AppPaths) -> Result<()> {
     let icefield = lua.create_table()?;
 
     // --- Sub-table: icefield.sys ---
@@ -40,7 +40,7 @@ pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
         lua.create_function(|_, cmd: String| Ok(has_command(&cmd)))?,
     )?;
 
-    let run_cmd_dir = config_dir.to_path_buf();
+    let run_cmd_dir = paths.config_dir.clone();
     sys.set(
         "run_command",
         lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
@@ -51,7 +51,7 @@ pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
 
     // --- Sub-table: icefield.fs ---
     let fs = lua.create_table()?;
-    let cfg_dir = config_dir.to_path_buf();
+    let cfg_dir = paths.config_dir.clone();
     fs.set(
         "config_dir",
         lua.create_function(move |_, ()| {
@@ -59,7 +59,7 @@ pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
         })?,
     )?;
 
-    let cch_dir = cache_dir.to_path_buf();
+    let cch_dir = paths.cache_dir.clone();
     fs.set(
         "cache_dir",
         lua.create_function(move |_, ()| {
@@ -83,7 +83,7 @@ pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
     register_format_helpers(&icefield, lua)?;
 
     // --- Sub-table: icefield.fetch ---
-    register_fetchers(&icefield, lua, cache_dir)?;
+    register_fetchers(&icefield, lua, paths)?;
 
     // --- Sub-table: icefield.drv ---
     register_drv_constructors(&icefield, lua)?;
@@ -151,17 +151,17 @@ fn register_drv_constructors(icefield: &Table, lua: &Lua) -> Result<()> {
 fn register_fetchers(
     icefield: &Table,
     lua: &Lua,
-    cache_dir: &Path,
+    paths: &paths::AppPaths,
 ) -> Result<()> {
     let fetch = lua.create_table()?;
-    let cache = cache_dir.to_path_buf();
+    let sd = paths.store_dir();
 
     // fetch.url({ url, hash, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "url",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
             let name: Option<String> = args.get("name")?;
@@ -173,11 +173,11 @@ fn register_fetchers(
     )?;
 
     // fetch.tarball({ url, hash, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "tarball",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
             let name: Option<String> = args.get("name")?;
@@ -189,11 +189,11 @@ fn register_fetchers(
     )?;
 
     // fetch.zip({ url, hash, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "zip",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
             let name: Option<String> = args.get("name")?;
@@ -205,11 +205,11 @@ fn register_fetchers(
     )?;
 
     // fetch.github({ owner, repo, rev, hash, host?, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "github",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
             let repo: String = args.get("repo")?;
@@ -224,11 +224,11 @@ fn register_fetchers(
     )?;
 
     // fetch.gitlab({ owner, repo, rev, hash, host?, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "gitlab",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
             let repo: String = args.get("repo")?;
@@ -243,11 +243,11 @@ fn register_fetchers(
     )?;
 
     // fetch.gitea({ host, owner, repo, rev, hash, name? })
-    let c = cache.clone();
+    let s = sd.clone();
     fetch.set(
         "gitea",
         lua.create_function(move |_, args: Table| {
-            let store = Store::new(&c);
+            let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
             let repo: String = args.get("repo")?;
@@ -550,8 +550,8 @@ mod tests {
         let dir = tempfile::tempdir()
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
         let config_dir = dir.path().join("cfg");
-        let cache_dir = dir.path().join("cch");
-        register(&lua, &config_dir, &cache_dir)?;
+        let paths = paths::AppPaths::resolve(Some(config_dir));
+        register(&lua, &paths)?;
 
         // Check sys
         let os: String = lua.load("icefield.sys.os").eval()?;

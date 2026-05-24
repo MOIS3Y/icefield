@@ -4,7 +4,7 @@
 //! execution information for auditing and troubleshooting, while keeping the
 //! main console output clean and professional.
 
-use std::path::Path;
+use crate::paths;
 use tracing::Level;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::time::LocalTime;
@@ -12,15 +12,20 @@ use tracing_subscriber::prelude::*;
 
 /// Initializes the global tracing subscriber with file-based logging.
 ///
-/// - All logs based on `verbosity` are written to `icefield.log` in `cache_dir`.
+/// - All logs based on `verbosity` are written to `icefield.log` in `log_dir`.
 /// - Console output is disabled to allow for a custom styled UI.
 /// - Uses local time and includes file/line information for better auditing.
 ///
 /// Returns a `WorkerGuard` that must be held by `main` to ensure logs are flushed.
 pub fn setup(
     verbosity: u8,
-    cache_dir: &Path,
+    paths: &paths::AppPaths,
 ) -> tracing_appender::non_blocking::WorkerGuard {
+    let log_dir = paths.log_dir();
+
+    // Ensure the log directory exists before initializing
+    paths::ensure_dir(&log_dir).ok();
+
     let level = match verbosity {
         0 => Level::INFO,
         1 => Level::DEBUG,
@@ -29,7 +34,7 @@ pub fn setup(
 
     // Create a rolling file appender
     let file_appender =
-        tracing_appender::rolling::never(cache_dir, crate::paths::LOG_FILE);
+        tracing_appender::rolling::never(log_dir, paths::LOG_FILE);
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
     // File layer for technical logs

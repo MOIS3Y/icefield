@@ -6,6 +6,7 @@
 
 use crate::builder::Builder;
 use crate::model::{Derivation, DerivationKind};
+use crate::paths;
 use crate::state::State;
 use crate::utils::{hash_content, hash_file};
 use anyhow::{Context, Result, anyhow};
@@ -23,8 +24,8 @@ use tracing::{debug, info, warn};
 /// temporary files for atomicity), manages symbolic links, and removes
 /// files that are no longer tracked.
 pub struct Switcher {
-    /// Path to the JSON file storing the state of managed configurations.
-    state_path: PathBuf,
+    /// Resolved application paths.
+    paths: paths::AppPaths,
 }
 
 #[derive(Debug, PartialEq)]
@@ -36,8 +37,10 @@ enum ChangeKind {
 
 impl Switcher {
     /// Creates a new `Switcher` instance.
-    pub fn new(state_path: PathBuf) -> Self {
-        Self { state_path }
+    pub fn new(paths: &paths::AppPaths) -> Self {
+        Self {
+            paths: paths.clone(),
+        }
     }
 
     /// Determines if a derivation requires privilege elevation.
@@ -75,7 +78,8 @@ impl Switcher {
             style("Applying configuration").bold()
         );
 
-        let current_state = State::load(&self.state_path)?;
+        let state_file = self.paths.state_file();
+        let current_state = State::load(&state_file)?;
         let mut new_state = State::default();
         let mut seen_targets = HashSet::new();
 
@@ -183,7 +187,11 @@ impl Switcher {
 
         let removed = self.garbage_collect(&current_state, &seen_targets)?;
 
-        new_state.save(&self.state_path)?;
+        // Ensure the data directory exists before saving the state
+        if let Some(parent) = state_file.parent() {
+            paths::ensure_dir(parent)?;
+        }
+        new_state.save(&state_file)?;
 
         println!(
             "  {} Finished: {} created, {} updated, {} skipped, {} removed",
@@ -270,7 +278,7 @@ impl Switcher {
                 })?;
                 duct::cmd!(tool, "mkdir", "-p", parent).run()?;
             } else {
-                fs::create_dir_all(parent)?;
+                paths::ensure_dir(parent)?;
             }
         }
 
@@ -336,7 +344,7 @@ impl Switcher {
                 })?;
                 duct::cmd!(tool, "mkdir", "-p", parent).run()?;
             } else {
-                fs::create_dir_all(parent)?;
+                paths::ensure_dir(parent)?;
             }
         }
 
@@ -488,7 +496,7 @@ impl Switcher {
             self.apply_ownership_elevated_link(tool, target, meta)?;
         } else {
             if let Some(parent) = target.parent() {
-                fs::create_dir_all(parent)?;
+                paths::ensure_dir(parent)?;
             }
             #[cfg(unix)]
             std::os::unix::fs::symlink(&absolute_source, target)?;
@@ -565,6 +573,7 @@ impl Switcher {
 mod tests {
     use super::*;
     use crate::model::CommonMeta;
+    use crate::paths::AppPaths;
     use tempfile::tempdir;
 
     fn mock_meta(target: PathBuf) -> CommonMeta {
@@ -583,10 +592,16 @@ mod tests {
     #[test]
     fn test_apply_new_file() -> Result<()> {
         let dir = tempdir()?;
-        let state_path = dir.path().join("state.json");
+        let data_dir = dir.path().join("data");
+        let paths = AppPaths::resolve(None);
+        // Manually override data_dir for testing
+        let mut paths = paths;
+        paths.data_dir = data_dir.clone();
+
+        let state_path = paths.state_file();
         let target_path = dir.path().join("test.txt");
 
-        let switcher = Switcher::new(state_path.clone());
+        let switcher = Switcher::new(&paths);
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Text {
@@ -607,7 +622,11 @@ mod tests {
     #[test]
     fn test_apply_garbage_collection() -> Result<()> {
         let dir = tempdir()?;
-        let state_path = dir.path().join("state.json");
+        let data_dir = dir.path().join("data");
+        let mut paths = AppPaths::resolve(None);
+        paths.data_dir = data_dir;
+
+        let state_path = paths.state_file();
         let target_path = dir.path().join("orphan.txt");
 
         // Pre-create an "orphaned" file and a state that tracks it
@@ -618,9 +637,10 @@ mod tests {
             "orphan-file".to_string(),
             "old-hash".to_string(),
         );
+        paths::ensure_dir(state_path.parent().unwrap())?;
         initial_state.save(&state_path)?;
 
-        let switcher = Switcher::new(state_path);
+        let switcher = Switcher::new(&paths);
         // Apply an empty config
         switcher.apply(&[], false)?;
 
@@ -632,12 +652,15 @@ mod tests {
     #[cfg(unix)]
     fn test_apply_symlink() -> Result<()> {
         let dir = tempdir()?;
-        let state_path = dir.path().join("state.json");
+        let data_dir = dir.path().join("data");
+        let mut paths = AppPaths::resolve(None);
+        paths.data_dir = data_dir;
+
         let target_path = dir.path().join("link");
         let source_path = dir.path().join("source.txt");
         fs::write(&source_path, "content")?;
 
-        let switcher = Switcher::new(state_path);
+        let switcher = Switcher::new(&paths);
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Symlink {

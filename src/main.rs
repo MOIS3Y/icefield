@@ -9,7 +9,6 @@
 
 mod builder;
 mod cli;
-mod store;
 mod inspector;
 mod logging;
 mod lua_api;
@@ -17,6 +16,7 @@ mod lua_engine;
 mod model;
 mod paths;
 mod state;
+mod store;
 mod switcher;
 mod utils;
 
@@ -24,7 +24,6 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use console::style;
 use lua_engine::LuaEngine;
-use std::path::PathBuf;
 use switcher::Switcher;
 
 /// Application entry point.
@@ -35,28 +34,11 @@ fn main() -> anyhow::Result<()> {
     // Phase 0: Initialization
     let cli = Cli::parse();
 
-    let (default_config_dir, default_state_path, default_cache_dir) =
-        paths::get_default_paths();
+    // Resolve project paths (Hierarchy: CLI > Env > XDG)
+    let paths = paths::AppPaths::resolve(cli.config.clone());
 
-    let config_path = cli
-        .config
-        .unwrap_or_else(|| default_config_dir.join(paths::CONFIG_FILE));
-    let state_path = cli.state.clone().unwrap_or(default_state_path);
-
-    // Determine the base directory for cache (store/fetchers) and logs.
-    // If state is overridden via CLI, we use its parent directory;
-    // otherwise, we fall back to the system default cache directory.
-    let base_cache_dir = if cli.state.is_some() {
-        state_path
-            .parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| PathBuf::from("."))
-    } else {
-        default_cache_dir
-    };
-
-    // Initialize logging (logs go to icefield.log in the base cache dir)
-    let _log_guard = logging::setup(cli.verbose, &base_cache_dir);
+    // Initialize logging (logs go to icefield.log in the resolved log directory)
+    let _log_guard = logging::setup(cli.verbose, &paths);
 
     // Command dispatching
     match cli.command {
@@ -85,15 +67,15 @@ fn main() -> anyhow::Result<()> {
                 style("Computing configuration").bold()
             );
 
-            let derivations =
-                LuaEngine::load_file(&config_path, &base_cache_dir)?;
+            // Phase 1: Compute (Lua -> Derivations)
+            let derivations = LuaEngine::load_file(&paths)?;
 
             // Phase 2 & 3: Build and Commit
-            let switcher = Switcher::new(state_path);
+            let switcher = Switcher::new(&paths);
             switcher.apply(&derivations, force)?;
         }
         Commands::Info => {
-            inspector::inspect(&state_path)?;
+            inspector::inspect(&paths)?;
         }
     }
 

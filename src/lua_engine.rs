@@ -9,6 +9,7 @@
 //! Rust structures.
 
 use crate::model::Derivation;
+use crate::paths;
 use anyhow::{Context, anyhow};
 use mlua::{Lua, LuaSerdeExt, Result, Table, Value};
 
@@ -33,13 +34,10 @@ impl LuaEngine {
     /// # Errors
     ///
     /// Returns a Lua error if the initialization or API registration fails.
-    pub fn new(
-        config_dir: &std::path::Path,
-        cache_dir: &std::path::Path,
-    ) -> Result<Self> {
+    pub fn new(paths: &paths::AppPaths) -> Result<Self> {
         let lua = mlua::Lua::new();
 
-        let config_dir_str = config_dir.to_string_lossy().to_string();
+        let config_dir_str = paths.config_dir.to_string_lossy().to_string();
         lua.globals().set("CONFIG_DIR", config_dir_str.clone())?;
 
         // Add CONFIG_DIR to package.path so `require` can find local modules
@@ -51,7 +49,7 @@ impl LuaEngine {
         ));
         package.set("path", path)?;
 
-        crate::lua_api::register(&lua, config_dir, cache_dir)?;
+        crate::lua_api::register(&lua, paths)?;
 
         Ok(Self { lua })
     }
@@ -104,9 +102,9 @@ impl LuaEngine {
     /// Returns an error if the file cannot be read, has syntax errors,
     /// or fails to produce a valid list of derivations.
     pub fn load_file(
-        path: &std::path::Path,
-        cache_dir: &std::path::Path,
+        paths: &paths::AppPaths,
     ) -> anyhow::Result<Vec<Derivation>> {
+        let path = &paths.config_file;
         if !path.exists() {
             anyhow::bail!("Config file not found: {:?}", path);
         }
@@ -115,10 +113,7 @@ impl LuaEngine {
             format!("Failed to read config file: {:?}", path)
         })?;
 
-        let config_dir =
-            path.parent().unwrap_or_else(|| std::path::Path::new("."));
-
-        let engine = Self::new(config_dir, cache_dir)
+        let engine = Self::new(paths)
             .map_err(|e| anyhow!("Failed to initialize Lua engine: {}", e))?;
 
         engine
@@ -155,7 +150,8 @@ mod tests {
             "#
         )?;
 
-        let derivations = LuaEngine::load_file(&config_path, dir.path())?;
+        let paths = paths::AppPaths::resolve(Some(config_path));
+        let derivations = LuaEngine::load_file(&paths)?;
         assert_eq!(derivations.len(), 1);
         assert_eq!(derivations[0].meta.name, "test");
         Ok(())
@@ -163,21 +159,19 @@ mod tests {
 
     #[test]
     fn test_load_file_not_found() {
-        let result = LuaEngine::load_file(
-            std::path::Path::new("non_existent.lua"),
-            std::path::Path::new("/dummy"),
-        );
+        let paths = paths::AppPaths::resolve(Some(std::path::PathBuf::from(
+            "non_existent.lua",
+        )));
+        let result = LuaEngine::load_file(&paths);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
     fn test_execute_simple_config() -> Result<()> {
-        let engine = LuaEngine::new(
-            std::path::Path::new("/dummy/config"),
-            std::path::Path::new("/dummy/cache"),
-        )
-        .unwrap();
+        let dir = tempdir()?;
+        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
+        let engine = LuaEngine::new(&paths).unwrap();
         let script = r#"
             local drv = icefield.drv
             return {
@@ -190,7 +184,7 @@ mod tests {
             }
         "#;
 
-        let derivations = engine.execute(script, "dummy/config/init.lua")?;
+        let derivations = engine.execute(script, "init.lua")?;
         assert_eq!(derivations.len(), 1);
         assert_eq!(derivations[0].meta.name, "test-toml");
         assert_eq!(
@@ -202,11 +196,9 @@ mod tests {
 
     #[test]
     fn test_execute_multiple_derivations() -> Result<()> {
-        let engine = LuaEngine::new(
-            std::path::Path::new("/dummy/config"),
-            std::path::Path::new("/dummy/cache"),
-        )
-        .unwrap();
+        let dir = tempdir()?;
+        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
+        let engine = LuaEngine::new(&paths).unwrap();
         let script = r#"
             local drv = icefield.drv
             return {
@@ -225,7 +217,7 @@ mod tests {
             }
         "#;
 
-        let derivations = engine.execute(script, "dummy/config/init.lua")?;
+        let derivations = engine.execute(script, "init.lua")?;
         assert_eq!(derivations.len(), 2);
         assert_eq!(derivations[0].meta.name, "toml");
         assert_eq!(derivations[1].meta.name, "link");
@@ -233,24 +225,21 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_invalid_script() {
-        let engine = LuaEngine::new(
-            std::path::Path::new("/dummy/config"),
-            std::path::Path::new("/dummy/cache"),
-        )
-        .unwrap();
+    fn test_execute_invalid_script() -> Result<()> {
+        let dir = tempdir()?;
+        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
+        let engine = LuaEngine::new(&paths).unwrap();
         let script = "this is not valid lua";
-        let result = engine.execute(script, "dummy/config/init.lua");
+        let result = engine.execute(script, "init.lua");
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_execute_missing_required_fields() {
-        let engine = LuaEngine::new(
-            std::path::Path::new("/dummy/config"),
-            std::path::Path::new("/dummy/cache"),
-        )
-        .unwrap();
+    fn test_execute_missing_required_fields() -> Result<()> {
+        let dir = tempdir()?;
+        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
+        let engine = LuaEngine::new(&paths).unwrap();
         // Missing 'target' field
         let script = r#"
             local drv = icefield.drv
@@ -261,7 +250,8 @@ mod tests {
                 })
             }
         "#;
-        let result = engine.execute(script, "dummy/config/init.lua");
+        let result = engine.execute(script, "init.lua");
         assert!(result.is_err());
+        Ok(())
     }
 }
