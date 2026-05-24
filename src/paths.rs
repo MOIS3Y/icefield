@@ -11,6 +11,8 @@ use std::path::PathBuf;
 pub const CONFIG_FILE: &str = "init.lua";
 pub const STATE_FILE: &str = "state.json";
 pub const LOG_FILE: &str = "icefield.log";
+/// Subdirectory within the cache directory where remote artifacts are stored.
+pub const STORE_DIR: &str = "store";
 
 /// Returns the default configuration directory, state file path, and cache directory.
 ///

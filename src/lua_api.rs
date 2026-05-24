@@ -4,14 +4,15 @@
 //! exposed to the user's Lua configuration via the global `icefield` table.
 //! It includes tools for path expansion, command execution, and system inspection.
 
-use mlua::{Lua, LuaSerdeExt, Result};
+use crate::store::Store;
+use mlua::{Lua, LuaSerdeExt, Result, Table};
 use std::path::Path;
 
 /// Registers the `icefield` global table and all its helper functions.
-pub fn register(lua: &Lua, config_dir: &Path) -> Result<()> {
+pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
     let icefield = lua.create_table()?;
 
-    // 1. System Info (as static values)
+    // 1. System Info
     icefield.set("os", get_os())?;
     icefield.set("username", get_username())?;
     icefield.set("hostname", get_hostname())?;
@@ -33,18 +34,178 @@ pub fn register(lua: &Lua, config_dir: &Path) -> Result<()> {
         "has_command",
         lua.create_function(|_, cmd: String| Ok(has_command(&cmd)))?,
     )?;
-
     icefield.set(
         "exists",
         lua.create_function(|_, path: String| Ok(path_exists(&path)))?,
     )?;
-
     icefield.set(
         "expand",
         lua.create_function(|_, path: String| Ok(path_expand(&path)))?,
     )?;
+    icefield.set(
+        "fake_hash",
+        "0000000000000000000000000000000000000000000000000000",
+    )?;
 
-    // 4. Data handling (Serialization/Deserialization)
+    // 4. Data handling (JSON, TOML, YAML)
+    register_data_helpers(&icefield, lua)?;
+
+    // 5. External Commands
+    let run_cmd_dir = config_dir.to_path_buf();
+    icefield.set(
+        "run_command",
+        lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
+            run_command(&cmd, args, &run_cmd_dir)
+        })?,
+    )?;
+
+    // 6. Fetchers
+    register_fetchers(&icefield, lua, cache_dir)?;
+
+    lua.globals().set("icefield", icefield)?;
+
+    // 7. Lua Bootstrap
+    bootstrap_lua_env(lua)?;
+
+    Ok(())
+}
+
+/// Helper to wrap fetch errors with a newline for Lua traceback.
+fn wrap_fetch_err(e: anyhow::Error, kind: &str) -> mlua::Error {
+    mlua::Error::RuntimeError(format!("\nFetch failed ({}): {}", kind, e))
+}
+
+/// Registers fetcher functions in the icefield table.
+fn register_fetchers(
+    icefield: &Table,
+    lua: &Lua,
+    cache_dir: &Path,
+) -> Result<()> {
+    let cache = cache_dir.to_path_buf();
+
+    // fetch_url({ url, hash, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_url",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let url: String = args.get("url")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_url(&url, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "URL"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    // fetch_tarball({ url, hash, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_tarball",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let url: String = args.get("url")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_tarball(&url, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "tarball"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    // fetch_zip({ url, hash, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_zip",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let url: String = args.get("url")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_zip(&url, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "ZIP"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    // fetch_from_github({ owner, repo, rev, hash, host?, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_from_github",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let host: Option<String> = args.get("host")?;
+            let owner: String = args.get("owner")?;
+            let repo: String = args.get("repo")?;
+            let rev: String = args.get("rev")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_from_github(host, &owner, &repo, &rev, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "GitHub"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    // fetch_from_gitlab({ owner, repo, rev, hash, host?, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_from_gitlab",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let host: Option<String> = args.get("host")?;
+            let owner: String = args.get("owner")?;
+            let repo: String = args.get("repo")?;
+            let rev: String = args.get("rev")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_from_gitlab(host, &owner, &repo, &rev, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "GitLab"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    // fetch_from_gitea({ host, owner, repo, rev, hash, name? })
+    let c = cache.clone();
+    icefield.set(
+        "fetch_from_gitea",
+        lua.create_function(move |_, args: Table| {
+            let store = Store::new(&c);
+            let host: Option<String> = args.get("host")?;
+            let owner: String = args.get("owner")?;
+            let repo: String = args.get("repo")?;
+            let rev: String = args.get("rev")?;
+            let hash: String = args.get("hash")?;
+            let name: Option<String> = args.get("name")?;
+            let path = store
+                .fetch_from_gitea(host, &owner, &repo, &rev, &hash, name)
+                .map_err(|e| wrap_fetch_err(e, "Gitea"))?;
+            Ok(path.to_string_lossy().into_owned())
+        })?,
+    )?;
+
+    Ok(())
+}
+
+/// Injects high-level Lua wrappers and string extensions.
+fn bootstrap_lua_env(lua: &Lua) -> Result<()> {
+    lua.load(
+        r#"
+        -- String helpers
+        function string.trim(s)
+            return s:match("^%s*(.-)%s*$")
+        end
+    "#,
+    )
+    .exec()
+}
+
+/// Registers data serialization and parsing helpers.
+fn register_data_helpers(icefield: &Table, lua: &Lua) -> Result<()> {
     icefield.set(
         "from_json",
         lua.create_function(|lua, s: String| {
@@ -97,27 +258,6 @@ pub fn register(lua: &Lua, config_dir: &Path) -> Result<()> {
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
         })?,
     )?;
-
-    // 5. icefield.run_command(cmd, args)
-    let run_cmd_dir = config_dir.to_path_buf();
-    icefield.set(
-        "run_command",
-        lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
-            run_command(&cmd, args, &run_cmd_dir)
-        })?,
-    )?;
-
-    lua.globals().set("icefield", icefield)?;
-
-    // Register string.trim helper
-    lua.load(
-        r#"
-        function string.trim(s)
-            return s:match("^%s*(.-)%s*$")
-        end
-    "#,
-    )
-    .exec()?;
 
     Ok(())
 }

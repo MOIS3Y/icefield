@@ -25,7 +25,10 @@ impl LuaEngine {
     /// 2. Injects the `CONFIG_DIR` global variable.
     /// 3. Configures `package.path` to allow `require` to find local modules.
     /// 4. Registers derivation constructors and the system API.
-    pub fn new(config_dir: &std::path::Path) -> Result<Self> {
+    pub fn new(
+        config_dir: &std::path::Path,
+        cache_dir: &std::path::Path,
+    ) -> Result<Self> {
         let lua = mlua::Lua::new();
 
         let config_dir_str = config_dir.to_string_lossy().to_string();
@@ -41,7 +44,7 @@ impl LuaEngine {
         package.set("path", path)?;
 
         Self::register_constructors(&lua)?;
-        crate::lua_api::register(&lua, config_dir)?;
+        crate::lua_api::register(&lua, config_dir, cache_dir)?;
 
         Ok(Self { lua })
     }
@@ -127,6 +130,7 @@ impl LuaEngine {
     /// or fails to produce a valid list of derivations.
     pub fn load_file(
         path: &std::path::Path,
+        cache_dir: &std::path::Path,
     ) -> anyhow::Result<Vec<Derivation>> {
         if !path.exists() {
             anyhow::bail!("Config file not found: {:?}", path);
@@ -139,7 +143,7 @@ impl LuaEngine {
         let config_dir =
             path.parent().unwrap_or_else(|| std::path::Path::new("."));
 
-        let engine = Self::new(config_dir)
+        let engine = Self::new(config_dir, cache_dir)
             .map_err(|e| anyhow!("Failed to initialize Lua engine: {}", e))?;
 
         engine
@@ -174,7 +178,7 @@ mod tests {
             "#
         )?;
 
-        let derivations = LuaEngine::load_file(&config_path)?;
+        let derivations = LuaEngine::load_file(&config_path, dir.path())?;
         assert_eq!(derivations.len(), 1);
         assert_eq!(derivations[0].meta.name, "test");
         Ok(())
@@ -182,16 +186,21 @@ mod tests {
 
     #[test]
     fn test_load_file_not_found() {
-        let result =
-            LuaEngine::load_file(std::path::Path::new("non_existent.lua"));
+        let result = LuaEngine::load_file(
+            std::path::Path::new("non_existent.lua"),
+            std::path::Path::new("/dummy"),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
 
     #[test]
     fn test_execute_simple_config() -> Result<()> {
-        let engine =
-            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
+        let engine = LuaEngine::new(
+            std::path::Path::new("/dummy/config"),
+            std::path::Path::new("/dummy/cache"),
+        )
+        .unwrap();
         let script = r#"
             return {
                 mkTomlDerivation({
@@ -215,8 +224,11 @@ mod tests {
 
     #[test]
     fn test_execute_multiple_derivations() -> Result<()> {
-        let engine =
-            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
+        let engine = LuaEngine::new(
+            std::path::Path::new("/dummy/config"),
+            std::path::Path::new("/dummy/cache"),
+        )
+        .unwrap();
         let script = r#"
             return {
                 mkTomlDerivation({
@@ -243,8 +255,11 @@ mod tests {
 
     #[test]
     fn test_execute_invalid_script() {
-        let engine =
-            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
+        let engine = LuaEngine::new(
+            std::path::Path::new("/dummy/config"),
+            std::path::Path::new("/dummy/cache"),
+        )
+        .unwrap();
         let script = "this is not valid lua";
         let result = engine.execute(script, "dummy/config/init.lua");
         assert!(result.is_err());
@@ -252,8 +267,11 @@ mod tests {
 
     #[test]
     fn test_execute_missing_required_fields() {
-        let engine =
-            LuaEngine::new(std::path::Path::new("/dummy/config")).unwrap();
+        let engine = LuaEngine::new(
+            std::path::Path::new("/dummy/config"),
+            std::path::Path::new("/dummy/cache"),
+        )
+        .unwrap();
         // Missing 'target' field
         let script = r#"
             return {
