@@ -24,7 +24,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Switch to the provided configuration (alias for apply)
+    /// Switch to the provided configuration
     Switch {
         /// Dry run: show what would be done without making changes
         #[arg(short, long)]
