@@ -555,6 +555,7 @@ mod tests {
     fn mock_meta(target: PathBuf) -> CommonMeta {
         CommonMeta {
             name: "test".to_string(),
+            enable: true,
             target,
             force: None,
             sudo: None,

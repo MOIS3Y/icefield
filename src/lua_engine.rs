@@ -102,9 +102,12 @@ impl LuaEngine {
         // accurately determine the source file path.
         let value: Value =
             self.lua.load(source).set_name(chunk_name).eval()?;
-        let derivations: Vec<Derivation> = self.lua.from_value(value)?;
+        let mut derivations: Vec<Derivation> = self.lua.from_value(value)?;
+
+        derivations.retain(|d| d.meta.enable);
+
         tracing::debug!(
-            "Extracted {} derivations from Lua",
+            "Extracted {} active derivations from Lua",
             derivations.len()
         );
         Ok(derivations)
@@ -163,6 +166,7 @@ mod tests {
             return {{
                 mkTomlDerivation({{
                     name = "test",
+                    enable = true,
                     target = "out.toml",
                     source = {{}}
                 }})
@@ -192,6 +196,7 @@ mod tests {
             return {
                 mkTomlDerivation({
                     name = "test-toml",
+                    enable = true,
                     target = "dummy/test.toml",
                     source = { key = "value" }
                 })
@@ -216,11 +221,13 @@ mod tests {
             return {
                 mkTomlDerivation({
                     name = "toml",
+                    enable = true,
                     target = "dummy/toml",
                     source = {}
                 }),
                 mkSymlinkDerivation({
                     name = "link",
+                    enable = true,
                     target = "dummy/link",
                     source_path = "/src/path"
                 })

@@ -16,6 +16,8 @@ use std::path::PathBuf;
 pub struct CommonMeta {
     /// A descriptive name for this derivation (used in logs and progress bars).
     pub name: String,
+    /// If false, the derivation is completely ignored and its target is garbage collected.
+    pub enable: bool,
     /// The final destination path on the filesystem.
     pub target: PathBuf,
     /// If true, always overwrite the file even if the content hash hasn't changed.

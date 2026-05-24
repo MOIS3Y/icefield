@@ -160,6 +160,7 @@ mod tests {
     fn mock_meta() -> CommonMeta {
         CommonMeta {
             name: "test".to_string(),
+            enable: true,
             target: PathBuf::from("dummy/path.txt"),
             force: None,
             sudo: None,
