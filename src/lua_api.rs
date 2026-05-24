@@ -2,69 +2,106 @@
 //!
 //! This module provides a set of helper functions and system information
 //! exposed to the user's Lua configuration via the global `icefield` table.
-//! It includes tools for path expansion, command execution, and system inspection.
+//! It includes tools for path expansion, command execution, and system
+//! inspection, organized into logical sub-tables:
+//!
+//! - `sys`: System information (OS, hostname, username) and command execution.
+//! - `fs`: Filesystem utilities (path expansion, existence checks, directory
+//!   locations).
+//! - `format`: Data serialization and parsing (JSON, TOML, YAML).
+//! - `fetch`: Remote artifact downloaders (URL, GitHub, GitLab, Gitea).
+//! - `drv`: Derivation constructors (TOML, JSON, Copy, Symlink, etc.).
+//! - `lib`: High-level utility library containing helper functions for string
+//!   manipulation, table processing, hashing, and logic helpers.
 
 use crate::store::Store;
 use mlua::{Lua, LuaSerdeExt, Result, Table};
 use std::path::Path;
 
-/// Registers the `icefield` global table and all its helper functions.
+/// Registers the `icefield` global table and its structured sub-tables.
+///
+/// This is the main entry point for preparing the Lua environment with
+/// Icefield's built-in API.
+///
+/// # Errors
+///
+/// Returns a Lua error if table creation or registration fails.
 pub fn register(lua: &Lua, config_dir: &Path, cache_dir: &Path) -> Result<()> {
     let icefield = lua.create_table()?;
 
-    // 1. System Info
-    icefield.set("os", get_os())?;
-    icefield.set("username", get_username())?;
-    icefield.set("hostname", get_hostname())?;
+    // --- Sub-table: icefield.sys ---
+    let sys = lua.create_table()?;
+    sys.set("os", get_os())?;
+    sys.set("username", get_username())?;
+    sys.set("hostname", get_hostname())?;
 
-    // 2. Directory helpers
+    sys.set(
+        "has_command",
+        lua.create_function(|_, cmd: String| Ok(has_command(&cmd)))?,
+    )?;
+
+    let run_cmd_dir = config_dir.to_path_buf();
+    sys.set(
+        "run_command",
+        lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
+            run_command(&cmd, args, &run_cmd_dir)
+        })?,
+    )?;
+    icefield.set("sys", sys)?;
+
+    // --- Sub-table: icefield.fs ---
+    let fs = lua.create_table()?;
     let cfg_dir = config_dir.to_path_buf();
-    icefield.set(
+    fs.set(
         "config_dir",
         lua.create_function(move |_, ()| {
             Ok(cfg_dir.to_string_lossy().into_owned())
         })?,
     )?;
 
-    icefield
-        .set("home_dir", lua.create_function(|_, ()| Ok(get_home_dir()))?)?;
-
-    // 3. Utility functions
-    icefield.set(
-        "has_command",
-        lua.create_function(|_, cmd: String| Ok(has_command(&cmd)))?,
-    )?;
-    icefield.set(
-        "exists",
-        lua.create_function(|_, path: String| Ok(path_exists(&path)))?,
-    )?;
-    icefield.set(
-        "expand",
-        lua.create_function(|_, path: String| Ok(path_expand(&path)))?,
-    )?;
-    icefield.set(
-        "fake_hash",
-        "0000000000000000000000000000000000000000000000000000",
-    )?;
-
-    // 4. Data handling (JSON, TOML, YAML)
-    register_data_helpers(&icefield, lua)?;
-
-    // 5. External Commands
-    let run_cmd_dir = config_dir.to_path_buf();
-    icefield.set(
-        "run_command",
-        lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
-            run_command(&cmd, args, &run_cmd_dir)
+    let cch_dir = cache_dir.to_path_buf();
+    fs.set(
+        "cache_dir",
+        lua.create_function(move |_, ()| {
+            Ok(cch_dir.to_string_lossy().into_owned())
         })?,
     )?;
 
-    // 6. Fetchers
+    fs.set("home_dir", lua.create_function(|_, ()| Ok(get_home_dir()))?)?;
+
+    fs.set(
+        "exists",
+        lua.create_function(|_, path: String| Ok(path_exists(&path)))?,
+    )?;
+    fs.set(
+        "expand",
+        lua.create_function(|_, path: String| Ok(path_expand(&path)))?,
+    )?;
+    icefield.set("fs", fs)?;
+
+    // --- Sub-table: icefield.format ---
+    register_format_helpers(&icefield, lua)?;
+
+    // --- Sub-table: icefield.fetch ---
     register_fetchers(&icefield, lua, cache_dir)?;
 
+    // --- Sub-table: icefield.drv ---
+    register_drv_constructors(&icefield, lua)?;
+
+    // --- Sub-table: icefield.lib ---
+    let lib = lua.create_table()?;
+    lib.set(
+        "fake_hash",
+        lua.create_function(|_, ()| {
+            Ok("0000000000000000000000000000000000000000000000000000")
+        })?,
+    )?;
+    icefield.set("lib", lib)?;
+
+    // --- Finalize: icefield table ---
     lua.globals().set("icefield", icefield)?;
 
-    // 7. Lua Bootstrap
+    // --- Lua Bootstrap (populates icefield.lib with Lua helpers) ---
     bootstrap_lua_env(lua)?;
 
     Ok(())
@@ -75,18 +112,54 @@ fn wrap_fetch_err(e: anyhow::Error, kind: &str) -> mlua::Error {
     mlua::Error::RuntimeError(format!("\nFetch failed ({}): {}", kind, e))
 }
 
-/// Registers fetcher functions in the icefield table.
+/// Registers derivation constructors in the `icefield.drv` table.
+///
+/// These constructors add a `"type"` tag to the configuration table,
+/// allowing Rust to deserialize it into the correct `DerivationKind`.
+fn register_drv_constructors(icefield: &Table, lua: &Lua) -> Result<()> {
+    let drv = lua.create_table()?;
+
+    let kinds = [
+        ("json", "json"),
+        ("yaml", "yaml"),
+        ("toml", "toml"),
+        ("ini", "ini"),
+        ("env", "env"),
+        ("text", "text"),
+        ("template", "template"),
+        ("scss", "scss"),
+        ("copy", "copy"),
+        ("symlink", "symlink"),
+    ];
+
+    for (name, kind_tag) in kinds {
+        let func = lua.create_function(move |_, args: Table| {
+            args.set("type", kind_tag)?;
+            Ok(args)
+        })?;
+        drv.set(name, func)?;
+    }
+
+    icefield.set("drv", drv)?;
+    Ok(())
+}
+
+/// Registers fetcher functions in the `icefield.fetch` table.
+///
+/// Fetchers download remote resources and place them in the content-addressable
+/// store, verifying their integrity via SHA-256 hashes.
 fn register_fetchers(
     icefield: &Table,
     lua: &Lua,
     cache_dir: &Path,
 ) -> Result<()> {
+    let fetch = lua.create_table()?;
     let cache = cache_dir.to_path_buf();
 
-    // fetch_url({ url, hash, name? })
+    // fetch.url({ url, hash, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_url",
+    fetch.set(
+        "url",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let url: String = args.get("url")?;
@@ -99,10 +172,10 @@ fn register_fetchers(
         })?,
     )?;
 
-    // fetch_tarball({ url, hash, name? })
+    // fetch.tarball({ url, hash, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_tarball",
+    fetch.set(
+        "tarball",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let url: String = args.get("url")?;
@@ -115,10 +188,10 @@ fn register_fetchers(
         })?,
     )?;
 
-    // fetch_zip({ url, hash, name? })
+    // fetch.zip({ url, hash, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_zip",
+    fetch.set(
+        "zip",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let url: String = args.get("url")?;
@@ -131,10 +204,10 @@ fn register_fetchers(
         })?,
     )?;
 
-    // fetch_from_github({ owner, repo, rev, hash, host?, name? })
+    // fetch.github({ owner, repo, rev, hash, host?, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_from_github",
+    fetch.set(
+        "github",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let host: Option<String> = args.get("host")?;
@@ -150,10 +223,10 @@ fn register_fetchers(
         })?,
     )?;
 
-    // fetch_from_gitlab({ owner, repo, rev, hash, host?, name? })
+    // fetch.gitlab({ owner, repo, rev, hash, host?, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_from_gitlab",
+    fetch.set(
+        "gitlab",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let host: Option<String> = args.get("host")?;
@@ -169,10 +242,10 @@ fn register_fetchers(
         })?,
     )?;
 
-    // fetch_from_gitea({ host, owner, repo, rev, hash, name? })
+    // fetch.gitea({ host, owner, repo, rev, hash, name? })
     let c = cache.clone();
-    icefield.set(
-        "fetch_from_gitea",
+    fetch.set(
+        "gitea",
         lua.create_function(move |_, args: Table| {
             let store = Store::new(&c);
             let host: Option<String> = args.get("host")?;
@@ -188,77 +261,93 @@ fn register_fetchers(
         })?,
     )?;
 
+    icefield.set("fetch", fetch)?;
     Ok(())
 }
 
-/// Injects high-level Lua wrappers and string extensions.
+/// Injects high-level Lua wrappers and string extensions into `icefield.lib`.
+/// Also extends the global `string` table with the `trim` method for convenience.
 fn bootstrap_lua_env(lua: &Lua) -> Result<()> {
     lua.load(
         r#"
-        -- String helpers
+        -- Add to global string table for s:trim() support
         function string.trim(s)
             return s:match("^%s*(.-)%s*$")
         end
+
+        -- Also expose via icefield.lib
+        local lib = icefield.lib
+        lib.string = lib.string or {}
+        lib.string.trim = string.trim
     "#,
     )
     .exec()
 }
 
-/// Registers data serialization and parsing helpers.
-fn register_data_helpers(icefield: &Table, lua: &Lua) -> Result<()> {
-    icefield.set(
-        "from_json",
+/// Registers data serialization and parsing helpers in the `icefield.format` table.
+fn register_format_helpers(icefield: &Table, lua: &Lua) -> Result<()> {
+    let format = lua.create_table()?;
+
+    // JSON
+    let json = lua.create_table()?;
+    json.set(
+        "parse",
         lua.create_function(|lua, s: String| {
             let v = parse_json(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
         })?,
     )?;
-
-    icefield.set(
-        "to_json",
+    json.set(
+        "generate",
         lua.create_function(|lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             Ok(serialize_json(&v))
         })?,
     )?;
+    format.set("json", json)?;
 
-    icefield.set(
-        "from_toml",
+    // TOML
+    let toml = lua.create_table()?;
+    toml.set(
+        "parse",
         lua.create_function(|lua, s: String| {
             let v = parse_toml(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
         })?,
     )?;
-
-    icefield.set(
-        "to_toml",
+    toml.set(
+        "generate",
         lua.create_function(|lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             serialize_toml(&v)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
         })?,
     )?;
+    format.set("toml", toml)?;
 
-    icefield.set(
-        "from_yaml",
+    // YAML
+    let yaml = lua.create_table()?;
+    yaml.set(
+        "parse",
         lua.create_function(|lua, s: String| {
             let v = parse_yaml(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
         })?,
     )?;
-
-    icefield.set(
-        "to_yaml",
+    yaml.set(
+        "generate",
         lua.create_function(|lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             serialize_yaml(&v)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
         })?,
     )?;
+    format.set("yaml", yaml)?;
 
+    icefield.set("format", format)?;
     Ok(())
 }
 
@@ -310,6 +399,10 @@ pub fn path_expand(path: &str) -> String {
 }
 
 /// Parses a JSON string into a `serde_json::Value`.
+///
+/// # Errors
+///
+/// Returns an error if the string is not valid JSON.
 pub fn parse_json(s: &str) -> anyhow::Result<serde_json::Value> {
     serde_json::from_str(s)
         .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))
@@ -321,23 +414,39 @@ pub fn serialize_json(v: &serde_json::Value) -> String {
 }
 
 /// Parses a TOML string into a `serde_json::Value`.
+///
+/// # Errors
+///
+/// Returns an error if the string is not valid TOML.
 pub fn parse_toml(s: &str) -> anyhow::Result<serde_json::Value> {
     toml::from_str(s).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))
 }
 
 /// Serializes a `serde_json::Value` into a TOML string.
+///
+/// # Errors
+///
+/// Returns an error if the value cannot be represented as TOML.
 pub fn serialize_toml(v: &serde_json::Value) -> anyhow::Result<String> {
     toml::to_string(v)
         .map_err(|e| anyhow::anyhow!("TOML serialize error: {}", e))
 }
 
 /// Parses a YAML string into a `serde_json::Value`.
+///
+/// # Errors
+///
+/// Returns an error if the string is not valid YAML.
 pub fn parse_yaml(s: &str) -> anyhow::Result<serde_json::Value> {
     serde_yaml::from_str(s)
         .map_err(|e| anyhow::anyhow!("YAML parse error: {}", e))
 }
 
 /// Serializes a `serde_json::Value` into a YAML string.
+///
+/// # Errors
+///
+/// Returns an error if the value cannot be represented as YAML.
 pub fn serialize_yaml(v: &serde_json::Value) -> anyhow::Result<String> {
     serde_yaml::to_string(v)
         .map_err(|e| anyhow::anyhow!("YAML serialize error: {}", e))
@@ -350,7 +459,7 @@ pub fn serialize_yaml(v: &serde_json::Value) -> anyhow::Result<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if the command fails to execute or returns a non-zero
+/// Returns a Lua error if the command fails to execute or returns a non-zero
 /// exit code.
 pub fn run_command(
     cmd: &str,
@@ -436,10 +545,39 @@ mod tests {
     }
 
     #[test]
-    fn test_yaml_helpers() {
-        let yaml = "foo: bar";
-        let v = parse_yaml(yaml).unwrap();
-        assert_eq!(v["foo"], "bar");
-        assert_eq!(serialize_yaml(&v).unwrap().trim(), "foo: bar");
+    fn test_lua_hierarchy() -> Result<()> {
+        let lua = Lua::new();
+        let dir = tempfile::tempdir()
+            .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+        let config_dir = dir.path().join("cfg");
+        let cache_dir = dir.path().join("cch");
+        register(&lua, &config_dir, &cache_dir)?;
+
+        // Check sys
+        let os: String = lua.load("icefield.sys.os").eval()?;
+        assert!(os == "linux" || os == "macos" || os == "unix");
+
+        // Check fs
+        let home: String = lua.load("icefield.fs.home_dir()").eval()?;
+        assert!(!home.is_empty());
+
+        // Check format
+        let json: String =
+            lua.load("icefield.format.json.generate({a=1})").eval()?;
+        assert!(json.contains("\"a\": 1"));
+
+        // Check lib.string.trim
+        let trimmed: String =
+            lua.load("icefield.lib.string.trim('  hello  ')").eval()?;
+        assert_eq!(trimmed, "hello");
+
+        // Check lib.fake_hash()
+        let hash: String = lua.load("icefield.lib.fake_hash()").eval()?;
+        assert_eq!(
+            hash,
+            "0000000000000000000000000000000000000000000000000000"
+        );
+
+        Ok(())
     }
 }

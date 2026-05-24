@@ -3,6 +3,10 @@
 //! This module encapsulates the Lua runtime and is responsible for executing
 //! the user's configuration and transforming it into a list of Rust-native
 //! `Derivation` structures.
+//!
+//! It provides the `LuaEngine`, which prepares the Lua environment, registers
+//! the Icefield API, and handles the deserialization of Lua tables into
+//! Rust structures.
 
 use crate::model::Derivation;
 use anyhow::{Context, anyhow};
@@ -24,7 +28,11 @@ impl LuaEngine {
     /// 1. Initializes a new Lua state.
     /// 2. Injects the `CONFIG_DIR` global variable.
     /// 3. Configures `package.path` to allow `require` to find local modules.
-    /// 4. Registers derivation constructors and the system API.
+    /// 4. Registers the system API and derivation constructors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Lua error if the initialization or API registration fails.
     pub fn new(
         config_dir: &std::path::Path,
         cache_dir: &std::path::Path,
@@ -43,48 +51,15 @@ impl LuaEngine {
         ));
         package.set("path", path)?;
 
-        Self::register_constructors(&lua)?;
         crate::lua_api::register(&lua, config_dir, cache_dir)?;
 
         Ok(Self { lua })
     }
 
-    /// Registers `mk*Derivation` constructors in the Lua global scope.
-    ///
-    /// These functions take a configuration table, inject a `"type"` field
-    /// used for Rust deserialization, and return the modified table.
-    /// All path resolution within these tables is now explicit and handled
-    /// by the user via the `icefield` API.
-    fn register_constructors(lua: &Lua) -> Result<()> {
-        let globals = lua.globals();
-
-        let kinds = [
-            ("mkJsonDerivation", "json"),
-            ("mkYamlDerivation", "yaml"),
-            ("mkTomlDerivation", "toml"),
-            ("mkIniDerivation", "ini"),
-            ("mkEnvDerivation", "env"),
-            ("mkTextDerivation", "text"),
-            ("mkTemplateDerivation", "template"),
-            ("mkScssDerivation", "scss"),
-            ("mkCopyDerivation", "copy"),
-            ("mkSymlinkDerivation", "symlink"),
-        ];
-
-        for (func_name, kind_tag) in kinds {
-            let func = lua.create_function(move |_, args: Table| {
-                args.set("type", kind_tag)?;
-                Ok(args)
-            })?;
-            globals.set(func_name, func)?;
-        }
-
-        Ok(())
-    }
-
     /// Executes a Lua script and returns a list of Derivations.
     ///
     /// The script is expected to return a Lua table (array) of derivations.
+    /// Derivations with `enable = false` are filtered out.
     ///
     /// # Errors
     ///
@@ -166,15 +141,17 @@ mod tests {
 
         writeln!(
             file,
+            "{}",
             r#"
-            return {{
-                mkTomlDerivation({{
+            local drv = icefield.drv
+            return {
+                drv.toml({
                     name = "test",
                     enable = true,
                     target = "out.toml",
-                    source = {{}}
-                }})
-            }}
+                    source = {}
+                })
+            }
             "#
         )?;
 
@@ -202,8 +179,9 @@ mod tests {
         )
         .unwrap();
         let script = r#"
+            local drv = icefield.drv
             return {
-                mkTomlDerivation({
+                drv.toml({
                     name = "test-toml",
                     enable = true,
                     target = "dummy/test.toml",
@@ -230,14 +208,15 @@ mod tests {
         )
         .unwrap();
         let script = r#"
+            local drv = icefield.drv
             return {
-                mkTomlDerivation({
+                drv.toml({
                     name = "toml",
                     enable = true,
                     target = "dummy/toml",
                     source = {}
                 }),
-                mkSymlinkDerivation({
+                drv.symlink({
                     name = "link",
                     enable = true,
                     target = "dummy/link",
@@ -274,8 +253,9 @@ mod tests {
         .unwrap();
         // Missing 'target' field
         let script = r#"
+            local drv = icefield.drv
             return {
-                mkTomlDerivation({
+                drv.toml({
                     name = "invalid",
                     source = {}
                 })
