@@ -115,16 +115,20 @@ impl Switcher {
                         ChangeKind::Updated => updated += 1,
                         ChangeKind::None => skipped += 1,
                     }
-                    new_state.managed_files.insert(
+                    new_state.add_file(
                         target.clone(),
+                        der.meta.name.clone(),
                         format!("symlink:{}", source_path.display()),
                     );
                 }
                 DerivationKind::Copy { source_path } => {
                     let hash = hash_file(source_path)?;
                     let exists_on_disk = target.exists();
-                    let hash_changed =
-                        current_state.managed_files.get(target) != Some(&hash);
+                    let hash_changed = current_state
+                        .managed_files
+                        .get(target)
+                        .map(|s| s.hash.as_str())
+                        != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
                         self.copy_file(source_path, target, &der.meta)?;
@@ -137,15 +141,22 @@ impl Switcher {
                         debug!("Skipping unchanged file: {:?}", target);
                         skipped += 1;
                     }
-                    new_state.managed_files.insert(target.clone(), hash);
+                    new_state.add_file(
+                        target.clone(),
+                        der.meta.name.clone(),
+                        hash,
+                    );
                 }
                 _ => {
                     let content = Builder::build(der)?;
                     let hash = hash_content(&content);
 
                     let exists_on_disk = target.exists();
-                    let hash_changed =
-                        current_state.managed_files.get(target) != Some(&hash);
+                    let hash_changed = current_state
+                        .managed_files
+                        .get(target)
+                        .map(|s| s.hash.as_str())
+                        != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
                         self.write_file(target, &content, &der.meta)?;
@@ -159,7 +170,11 @@ impl Switcher {
                         skipped += 1;
                     }
 
-                    new_state.managed_files.insert(target.clone(), hash);
+                    new_state.add_file(
+                        target.clone(),
+                        der.meta.name.clone(),
+                        hash,
+                    );
                 }
             }
             pb.inc(1);
@@ -598,9 +613,11 @@ mod tests {
         // Pre-create an "orphaned" file and a state that tracks it
         fs::write(&target_path, "orphan")?;
         let mut initial_state = State::default();
-        initial_state
-            .managed_files
-            .insert(target_path.clone(), "old-hash".to_string());
+        initial_state.add_file(
+            target_path.clone(),
+            "orphan-file".to_string(),
+            "old-hash".to_string(),
+        );
         initial_state.save(&state_path)?;
 
         let switcher = Switcher::new(state_path);

@@ -39,19 +39,22 @@ pub fn inspect(state_path: &Path) -> Result<()> {
 
     let total_files = state.managed_files.len();
 
-    for (path, expected_value) in &state.managed_files {
+    for (path, state_info) in &state.managed_files {
+        let expected_value = &state_info.hash;
+        let derivation_name = &state_info.name;
+
         let path_exists = path.exists() || fs::symlink_metadata(path).is_ok();
 
         if !path_exists {
-            print_missing(path);
+            print_missing(path, derivation_name);
             missing_count += 1;
             continue;
         }
 
         let status = if expected_value.starts_with("symlink:") {
-            inspect_symlink(path, expected_value)
+            inspect_symlink(path, expected_value, derivation_name)
         } else {
-            inspect_regular_file(path, expected_value)
+            inspect_regular_file(path, expected_value, derivation_name)
         };
 
         match status {
@@ -69,11 +72,12 @@ pub fn inspect(state_path: &Path) -> Result<()> {
 }
 
 /// Helper to print a missing file status.
-fn print_missing(path: &Path) {
+fn print_missing(path: &Path, name: &str) {
     println!(
-        "  {} {} {}",
+        "  {} {} {} {}",
         style("[ MISSING ]").red().bold(),
         style(path.display()).cyan(),
+        style(format!("[{}]", name)).dim(),
         style("(file not found on disk)").dim()
     );
 }
@@ -97,7 +101,7 @@ fn print_summary(
 /// This function verifies that the path exists, is actually a symlink,
 /// and points to the exact absolute path that was recorded during the
 /// last successful application.
-fn inspect_symlink(path: &Path, expected_value: &str) -> Status {
+fn inspect_symlink(path: &Path, expected_value: &str, name: &str) -> Status {
     let expected_target = expected_value.strip_prefix("symlink:").unwrap();
 
     // Canonicalize expected target to match what apply_symlink does
@@ -113,18 +117,20 @@ fn inspect_symlink(path: &Path, expected_value: &str) -> Status {
                 let actual_target_str = actual_target.to_string_lossy();
                 if actual_target_str == canonical_expected_str {
                     println!(
-                        "  {} {} {} {}",
+                        "  {} {} {} {} {}",
                         style("[   OK    ]").green().bold(),
                         style(path.display()).cyan(),
                         style("->").dim(),
-                        style(expected_target).dim()
+                        style(expected_target).dim(),
+                        style(format!("[{}]", name)).dim()
                     );
                     Status::Ok
                 } else {
                     println!(
-                        "  {} {} {}",
+                        "  {} {} {} {}",
                         style("[ MODIFIED]").yellow().bold(),
                         style(path.display()).cyan(),
+                        style(format!("[{}]", name)).dim(),
                         style(format!(
                             "(symlink drift: points to {})",
                             actual_target_str
@@ -136,9 +142,10 @@ fn inspect_symlink(path: &Path, expected_value: &str) -> Status {
             }
             Err(_) => {
                 println!(
-                    "  {} {} {}",
+                    "  {} {} {} {}",
                     style("[ MODIFIED]").yellow().bold(),
                     style(path.display()).cyan(),
+                    style(format!("[{}]", name)).dim(),
                     style("(failed to read symlink target)").dim()
                 );
                 Status::Modified
@@ -146,9 +153,10 @@ fn inspect_symlink(path: &Path, expected_value: &str) -> Status {
         },
         _ => {
             println!(
-                "  {} {} {}",
+                "  {} {} {} {}",
                 style("[ MODIFIED]").yellow().bold(),
                 style(path.display()).cyan(),
+                style(format!("[{}]", name)).dim(),
                 style("(expected symlink, found regular file/dir)").dim()
             );
             Status::Modified
@@ -161,15 +169,20 @@ fn inspect_symlink(path: &Path, expected_value: &str) -> Status {
 /// This function calculates the SHA-256 hash of the file currently on disk
 /// and checks if it matches the hash recorded in the state database. It also
 /// detects type mismatches (e.g., if a symlink replaced a regular file).
-fn inspect_regular_file(path: &Path, expected_value: &str) -> Status {
+fn inspect_regular_file(
+    path: &Path,
+    expected_value: &str,
+    name: &str,
+) -> Status {
     if fs::symlink_metadata(path)
         .map(|m| m.file_type().is_symlink())
         .unwrap_or(false)
     {
         println!(
-            "  {} {} {}",
+            "  {} {} {} {}",
             style("[ MODIFIED]").yellow().bold(),
             style(path.display()).cyan(),
+            style(format!("[{}]", name)).dim(),
             style("(expected regular file, found symlink)").dim()
         );
         return Status::Modified;
@@ -179,17 +192,19 @@ fn inspect_regular_file(path: &Path, expected_value: &str) -> Status {
         Ok(actual_hash) => {
             if actual_hash == *expected_value {
                 println!(
-                    "  {} {} {}",
+                    "  {} {} {} {}",
                     style("[   OK    ]").green().bold(),
                     style(path.display()).cyan(),
+                    style(format!("[{}]", name)).dim(),
                     style(format!("[{}]", &expected_value[..8])).dim()
                 );
                 Status::Ok
             } else {
                 println!(
-                    "  {} {} {}",
+                    "  {} {} {} {}",
                     style("[ MODIFIED]").yellow().bold(),
                     style(path.display()).cyan(),
+                    style(format!("[{}]", name)).dim(),
                     style("(content drift detected)").dim()
                 );
                 Status::Modified
@@ -197,9 +212,10 @@ fn inspect_regular_file(path: &Path, expected_value: &str) -> Status {
         }
         Err(_) => {
             println!(
-                "  {} {} {}",
+                "  {} {} {} {}",
                 style("[  ERROR  ]").red().bold(),
                 style(path.display()).cyan(),
+                style(format!("[{}]", name)).dim(),
                 style("(failed to read file for hashing)").dim()
             );
             // Treating read errors as missing/broken

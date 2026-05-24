@@ -9,18 +9,55 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Metadata for a single managed file tracked in the state database.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+pub struct ManagedFileState {
+    /// The descriptive name of the derivation that produced this file.
+    pub name: String,
+    /// The SHA-256 hash of the file content, or a special `symlink:` prefix.
+    pub hash: String,
+}
+
 /// Represents the persistent state of managed dotfiles.
 ///
-/// Tracks which files are managed by the tool and their content hashes
-/// to perform incremental updates and garbage collection.
-#[derive(Serialize, Deserialize, Debug, Default, PartialEq)]
+/// Tracks which files are managed by the tool, their derivation names,
+/// and content hashes to perform incremental updates and garbage collection.
+/// Includes an extensible cache for future features like remote fetching.
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub struct State {
-    /// Mapping of target file paths to their SHA-256 hashes or symlink info.
+    /// Schema version for future state migrations.
+    #[serde(default = "default_version")]
+    pub version: u32,
+    /// Mapping of target file paths to their metadata.
     /// Uses BTreeMap to ensure deterministic, sorted JSON output.
-    pub managed_files: BTreeMap<PathBuf, String>,
+    pub managed_files: BTreeMap<PathBuf, ManagedFileState>,
+    /// Extensible cache for storing intermediate calculations (e.g., color palettes).
+    #[serde(default)]
+    pub cache: serde_json::Value,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            version: default_version(),
+            managed_files: BTreeMap::new(),
+            cache: serde_json::Value::Null,
+        }
+    }
+}
+
+/// Returns the current default schema version for `state.json`.
+fn default_version() -> u32 {
+    1
 }
 
 impl State {
+    /// Adds a managed file record to the state.
+    pub fn add_file(&mut self, target: PathBuf, name: String, hash: String) {
+        self.managed_files
+            .insert(target, ManagedFileState { name, hash });
+    }
+
     /// Loads the state from a JSON file.
     ///
     /// If the file does not exist, returns a default empty state.
@@ -57,9 +94,11 @@ mod tests {
         let state_path = dir.path().join("state.json");
 
         let mut state = State::default();
-        state
-            .managed_files
-            .insert(PathBuf::from("config/test.conf"), "hash123".to_string());
+        state.add_file(
+            PathBuf::from("config/test.conf"),
+            "test-config".to_string(),
+            "hash123".to_string(),
+        );
 
         // Save
         state.save(&state_path)?;
