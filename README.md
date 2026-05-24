@@ -5,14 +5,16 @@ Icefield is a declarative dotfile manager powered by Rust and Lua. It allows you
 > [!IMPORTANT]
 > This project is currently under active development (Work In Progress). Use with caution on production systems.
 
-## Key Features
+## Features
 
-*   **Declarative Configuration**: Define your desired system state in Lua.
-*   **Atomic Updates**: Changes are applied in phases to prevent system inconsistency.
-*   **Template Support**: Use Jinja2-style templates (via Tera) for dynamic configurations.
-*   **Style Pre-processing**: Built-in SCSS compilation for managing complex stylesheets.
-*   **Garbage Collection**: Automatically removes files that are no longer present in your configuration.
-*   **State Tracking**: Maintains a `state.json` file to track managed files and their integrity via SHA-256 hashes.
+- **Hierarchical Lua API**: Clean organization into `drv`, `fs`, `sys`, `fetch`, and `format` sub-tables.
+- **Atomic Commits**: Changes are staged and applied atomically using temporary files and renames.
+- **XDG Compliance**: Respects system standards for configuration, data, and state directories.
+- **Content-Addressable Store**: Remote fetchers for URL, GitHub, GitLab, and Gitea with SHA-256 verification (Nix-style Base32).
+- **Drift Detection**: Use `icefield info` to see discrepancies between your config and the filesystem.
+- **Privilege Elevation**: Native support for `sudo`/`doas` when writing to system paths.
+- **Flexible Formats**: First-class support for JSON, YAML, TOML, INI, and environment variables.
+- **Developer Friendly**: Overridable paths via `ICEFIELD_*` environment variables and automatic development shell setup via Nix Flake.
 
 ## How it Works
 
@@ -33,26 +35,62 @@ If you are using Nix, you can enter the development environment directly:
 nix develop
 ```
 
-## Quick Start
+## Usage
 
-1. Create a configuration file at `~/.config/icefield/init.lua`.
-2. Define your first derivation:
-   ```lua
-   return {
-     mkTomlDerivation({
-       name = "example-config",
-       target = "~/.config/example/config.toml",
-       source = {
-         enabled = true,
-         theme = "dark"
-       }
-     })
-   }
-   ```
-3. Apply the configuration:
-   ```bash
-   icefield switch
-   ```
+Define your system state in `init.lua` (usually at `~/.config/icefield/init.lua`):
+
+```lua
+local drv = icefield.drv
+local fs = icefield.fs
+local fetch = icefield.fetch
+
+return {
+  -- Managed TOML configuration
+  drv.toml({
+    name = "helix-config",
+    enable = true,
+    target = fs.expand("~/.config/helix/config.toml"),
+    source = {
+      theme = "catppuccin_mocha",
+      editor = { line_numbers = "relative" }
+    }
+  }),
+
+  -- Remote artifacts with integrity checks
+  drv.copy({
+    name = "wallpaper",
+    enable = true,
+    target = fs.expand("~/Pictures/bg.jpg"),
+    source_path = fetch.url({
+      url = "https://example.com/wall.jpg",
+      hash = "18ayigi9i1hn461vdy082v6balrwgg58brfgkqd6984w0qxd86xp"
+    })
+  }),
+
+  -- Symbolic links
+  drv.symlink({
+    name = "scripts",
+    enable = true,
+    target = fs.expand("~/bin/my-tool"),
+    source_path = fs.config_dir() .. "/files/my-tool.sh"
+  }),
+
+  -- Scripts with execution permissions
+  drv.text({
+    name = "hello-script",
+    enable = true,
+    target = "~/bin/hello",
+    source = "#!/bin/sh\necho 'Hello from Icefield!'",
+    mode = "755" -- Set executable flag
+  })
+}
+```
+
+Apply changes:
+
+```bash
+icefield switch
+```
 
 ## License
 
