@@ -5,7 +5,7 @@
 //! throughout the build and commit phases.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Common configuration metadata available in any constructor.
@@ -60,12 +60,12 @@ pub enum DerivationKind {
     /// Nested mapping: \[Section\] -> \[Key\] -> Value.
     Ini {
         /// Nested mapping: \[Section\] -> \[Key\] -> Value.
-        source: HashMap<String, HashMap<String, String>>,
+        source: BTreeMap<String, BTreeMap<String, String>>,
     },
     /// Generates a flat `.env` file from a simple key-value map.
     Env {
         /// Mapping of environment variable names to their values.
-        source: HashMap<String, String>,
+        source: BTreeMap<String, String>,
     },
 
     // --- Text and Templates (Rendering) ---

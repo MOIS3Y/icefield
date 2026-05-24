@@ -7,7 +7,6 @@
 
 use crate::model::{Derivation, DerivationKind};
 use anyhow::{Context, Result, anyhow};
-use std::collections::HashMap;
 
 /// Sandbox builder for rendering derivations into final content.
 ///
@@ -63,55 +62,42 @@ impl Builder {
         Ok(content)
     }
 
-    /// Generates a flat `.env` file content.
+    /// Generates the content for a flat `.env` file.
     ///
-    /// The keys are sorted alphabetically to ensure deterministic output,
-    /// which is crucial for hash-based change detection.
-    fn build_env(source: &HashMap<String, String>) -> String {
+    /// The output is guaranteed to be deterministic (sorted by keys) to
+    /// ensure consistent content hashing across executions.
+    fn build_env(
+        source: &std::collections::BTreeMap<String, String>,
+    ) -> String {
         tracing::debug!("Building .env from {} variables", source.len());
-        let mut keys: Vec<&String> = source.keys().collect();
-        keys.sort();
-
         let mut content = String::new();
-        for k in keys {
-            content.push_str(&format!(
-                "{}=\"{}\"\n",
-                k,
-                source.get(k).unwrap()
-            ));
+        for (k, v) in source {
+            content.push_str(&format!("{}=\"{}\"\n", k, v));
         }
         content
     }
 
-    /// Generates an INI file content using the `rust-ini` crate.
+    /// Generates the content for an INI file.
     ///
-    /// The sections and keys are sorted alphabetically to ensure deterministic output,
-    /// which is crucial for hash-based change detection.
+    /// The output is guaranteed to be deterministic (sorted by sections and keys)
+    /// to ensure consistent content hashing across executions.
     ///
     /// # Errors
     ///
     /// Returns an error if the INI structure cannot be serialized or
     /// if the resulting buffer is not valid UTF-8.
     fn build_ini(
-        source: &HashMap<String, HashMap<String, String>>,
+        source: &std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        >,
     ) -> Result<String> {
         tracing::debug!("Building INI from {} sections", source.len());
         let mut ini = ini::Ini::new();
 
-        // Sort sections for determinism
-        let mut sections: Vec<&String> = source.keys().collect();
-        sections.sort();
-
-        for section in sections {
-            let params = source.get(section).unwrap();
-
-            // Sort keys within section for determinism
-            let mut keys: Vec<&String> = params.keys().collect();
-            keys.sort();
-
-            for k in keys {
-                ini.with_section(Some(section))
-                    .set(k, params.get(k).unwrap());
+        for (section, params) in source {
+            for (k, v) in params {
+                ini.with_section(Some(section)).set(k, v);
             }
         }
 
@@ -198,7 +184,7 @@ mod tests {
 
     #[test]
     fn test_build_env() -> Result<()> {
-        let mut source = HashMap::new();
+        let mut source = std::collections::BTreeMap::new();
         source.insert("Z".to_string(), "val1".to_string());
         source.insert("A".to_string(), "val2".to_string());
 
