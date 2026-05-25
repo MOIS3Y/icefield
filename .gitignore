@@ -35,3 +35,7 @@ shada/
 # --- System ---
 .DS_Store
 Thumbs.db
+
+# IDE & Auto-generated
+meta/
+.luarc.json
