@@ -16,6 +16,7 @@
 use crate::lua_registry::{ApiRegistry, LuaApiItem, LuaItemKind};
 use crate::paths;
 use crate::store::Store;
+use anyhow::Context;
 use mlua::{Lua, LuaSerdeExt, Result, Table};
 use std::path::Path;
 
@@ -300,6 +301,68 @@ pub fn register(
             },
         },
         |_, path: String| Ok(path_expand(&path)),
+    )?;
+
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "ls",
+            description: r#"
+                Returns a list of entries in a directory.
+                Each entry is a table containing 'name' and 'type'
+                ('file', 'directory', or 'symlink').
+            "#,
+            example: Some(
+                r#"
+                local entries = icefield.fs.ls("~/.config")
+                for _, entry in ipairs(entries) do
+                  print(entry.name .. " is a " .. entry.type)
+                end
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("path", "string")],
+                returns: "table",
+            },
+        },
+        |lua, path: String| {
+            let entries = fs_ls(&path).map_err(|e| {
+                mlua::Error::RuntimeError(format!("ls failed: {}", e))
+            })?;
+
+            let result = lua.create_table()?;
+            for (i, (name, type_str)) in entries.into_iter().enumerate() {
+                let entry_table = lua.create_table()?;
+                entry_table.set("name", name)?;
+                entry_table.set("type", type_str)?;
+                result.set(i + 1, entry_table)?;
+            }
+            Ok(result)
+        },
+    )?;
+
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "read_file",
+            description: "Reads the entire content of a file into a string.",
+            example: Some(
+                r#"local content = icefield.fs.read_file("/etc/hostname")"#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("path", "string")],
+                returns: "string",
+            },
+        },
+        |_, path: String| {
+            fs_read_file(&path).map_err(|e| {
+                mlua::Error::RuntimeError(format!("read_file failed: {}", e))
+            })
+        },
     )?;
     icefield.set("fs", fs)?;
 
@@ -976,6 +1039,54 @@ pub fn get_home_dir() -> String {
         .unwrap_or_else(|| "/".into())
 }
 
+/// Lists entries in a directory. Returns a vector of (name, type) tuples.
+///
+/// # Errors
+///
+/// Returns an error if the directory cannot be read or doesn't exist.
+pub fn fs_ls(path: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let expanded = path_expand(path);
+    let dir_path = Path::new(&expanded);
+
+    let entries = std::fs::read_dir(dir_path).with_context(|| {
+        format!("Failed to read directory: {:?}", dir_path)
+    })?;
+
+    let mut result = Vec::new();
+    for entry in entries {
+        let entry: std::fs::DirEntry = entry?;
+        let file_type = entry.file_type()?;
+
+        let type_str = if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_symlink() {
+            "symlink"
+        } else {
+            "file"
+        };
+
+        result.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            type_str.to_string(),
+        ));
+    }
+
+    // Sort for determinism in tests and predictable output
+    result.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(result)
+}
+
+/// Reads the entire content of a file into a string.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or doesn't exist.
+pub fn fs_read_file(path: &str) -> anyhow::Result<String> {
+    let expanded = path_expand(path);
+    std::fs::read_to_string(&expanded)
+        .with_context(|| format!("Failed to read file: {:?}", expanded))
+}
+
 /// Checks if a command exists in the system's PATH.
 pub fn has_command(cmd: &str) -> bool {
     which::which(cmd).is_ok()
@@ -1137,6 +1248,30 @@ mod tests {
         let v = parse_toml(toml).unwrap();
         assert_eq!(v["foo"], "bar");
         assert_eq!(serialize_toml(&v).unwrap().trim(), "foo = \"bar\"");
+    }
+
+    #[test]
+    fn test_fs_ls_and_read() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file_path = dir.path().join("test.txt");
+        let sub_dir = dir.path().join("subdir");
+        std::fs::write(&file_path, "hello world")?;
+        std::fs::create_dir(&sub_dir)?;
+
+        // Test read_file
+        let content = fs_read_file(file_path.to_str().unwrap())?;
+        assert_eq!(content, "hello world");
+
+        // Test ls
+        let entries = fs_ls(dir.path().to_str().unwrap())?;
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ("subdir".to_string(), "directory".to_string())
+        );
+        assert_eq!(entries[1], ("test.txt".to_string(), "file".to_string()));
+
+        Ok(())
     }
 
     #[test]
