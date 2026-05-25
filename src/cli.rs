@@ -36,4 +36,6 @@ pub enum Commands {
     },
     /// Show information about managed files and current state
     Info,
+    /// Generate EmmyLua stubs for IDE autocompletion
+    Stubs,
 }

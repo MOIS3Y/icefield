@@ -27,29 +27,43 @@ impl LuaEngine {
     ///
     /// This method:
     /// 1. Initializes a new Lua state.
-    /// 2. Injects the `CONFIG_DIR` global variable.
-    /// 3. Configures `package.path` to allow `require` to find local modules.
-    /// 4. Registers the system API and derivation constructors.
+    /// 2. Configures `package.path` to allow `require` to find local modules.
+    /// 3. Registers the system API and derivation constructors.
+    ///
+    /// # Safety and Features
+    ///
+    /// If the `unsafe-c-modules` feature is enabled, this method uses
+    /// `Lua::unsafe_new()` to allow loading external C libraries (like
+    /// `luasocket` or `cjson`). This is necessary because loading arbitrary
+    /// binary code cannot be verified by the Rust memory safety guarantees.
+    ///
+    /// Without this feature, the engine runs in safe mode, preventing the
+    /// use of `package.loadlib` and dynamic C-module loading.
     ///
     /// # Errors
     ///
     /// Returns a Lua error if the initialization or API registration fails.
     pub fn new(paths: &paths::AppPaths) -> Result<Self> {
+        #[cfg(feature = "unsafe-c-modules")]
+        let lua = unsafe { mlua::Lua::unsafe_new() };
+
+        #[cfg(not(feature = "unsafe-c-modules"))]
         let lua = mlua::Lua::new();
 
         let config_dir_str = paths.config_dir.to_string_lossy().to_string();
-        lua.globals().set("CONFIG_DIR", config_dir_str.clone())?;
 
-        // Add CONFIG_DIR to package.path so `require` can find local modules
+        // Add CONFIG_DIR to package.path so `require` can find local modules.
+        // Prepend package paths to ensure local modules have priority.
         let package: Table = lua.globals().get("package")?;
-        let mut path: String = package.get("path")?;
-        path.push_str(&format!(
-            ";{}/?.lua;{}/?/init.lua",
-            config_dir_str, config_dir_str
-        ));
-        package.set("path", path)?;
+        let old_path: String = package.get("path")?;
+        let new_path = format!(
+            "{}/?.lua;{}/?/init.lua;{}",
+            config_dir_str, config_dir_str, old_path
+        );
+        package.set("path", new_path)?;
 
-        crate::lua_api::register(&lua, paths)?;
+        let mut registry = crate::lua_registry::ApiRegistry::new();
+        crate::lua_api::register(&lua, paths, &mut registry)?;
 
         Ok(Self { lua })
     }

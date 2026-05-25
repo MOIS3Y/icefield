@@ -13,6 +13,7 @@ mod inspector;
 mod logging;
 mod lua_api;
 mod lua_engine;
+mod lua_registry;
 mod model;
 mod paths;
 mod state;
@@ -34,15 +35,22 @@ fn main() -> anyhow::Result<()> {
     // Phase 0: Initialization
     let cli = Cli::parse();
 
-    // Resolve project paths (Hierarchy: CLI > Env > XDG)
-    let paths = paths::AppPaths::resolve(cli.config.clone());
-
-    // Initialize logging (logs go to icefield.log in the resolved log directory)
-    let _log_guard = logging::setup(cli.verbose, &paths);
-
     // Command dispatching
     match cli.command {
+        Commands::Stubs => {
+            // Generate Lua API stubs
+            let paths = paths::AppPaths::resolve(None);
+            let lua = mlua::Lua::new();
+            let mut registry = lua_registry::ApiRegistry::new();
+            lua_api::register(&lua, &paths, &mut registry)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            println!("{}", registry.generate_stubs());
+            return Ok(());
+        }
         Commands::Switch { dry_run, force } => {
+            let paths = paths::AppPaths::resolve(cli.config.clone());
+            let _log_guard = logging::setup(cli.verbose, &paths);
+
             if dry_run {
                 println!(
                     "{} {}",
@@ -75,6 +83,8 @@ fn main() -> anyhow::Result<()> {
             switcher.apply(&derivations, force)?;
         }
         Commands::Info => {
+            let paths = paths::AppPaths::resolve(cli.config.clone());
+            let _log_guard = logging::setup(cli.verbose, &paths);
             inspector::inspect(&paths)?;
         }
     }

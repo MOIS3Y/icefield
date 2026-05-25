@@ -9,6 +9,9 @@ readme = "README.md"
 categories = ["command-line-utilities", "config"]
 keywords = ["dotfiles", "declarative", "lua", "manager"]
 
+[features]
+unsafe-c-modules = []
+
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }

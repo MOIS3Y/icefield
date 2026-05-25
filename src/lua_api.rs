@@ -13,6 +13,7 @@
 //! - `drv`: Derivation constructors (TOML, JSON, Copy, Symlink, etc.).
 //! - `lib`: High-level utility library containing helper functions for string
 //!   manipulation, table processing, hashing, and logic helpers.
+use crate::lua_registry::{ApiRegistry, LuaApiItem, LuaItemKind};
 use crate::paths;
 use crate::store::Store;
 use mlua::{Lua, LuaSerdeExt, Result, Table};
@@ -26,76 +27,183 @@ use std::path::Path;
 /// # Errors
 ///
 /// Returns a Lua error if table creation or registration fails.
-pub fn register(lua: &Lua, paths: &paths::AppPaths) -> Result<()> {
+pub fn register(
+    lua: &Lua,
+    paths: &paths::AppPaths,
+    registry: &mut ApiRegistry,
+) -> Result<()> {
     let icefield = lua.create_table()?;
 
     // --- Sub-table: icefield.sys ---
     let sys = lua.create_table()?;
-    sys.set("os", get_os())?;
-    sys.set("username", get_username())?;
-    sys.set("hostname", get_hostname())?;
+    registry.register_var(
+        &sys,
+        LuaApiItem {
+            table: "sys",
+            name: "os",
+            description: "Returns the name of the operating system ('linux', 'macos', or 'unix').",
+            kind: LuaItemKind::Variable { type_name: "string" },
+        },
+        get_os(),
+    )?;
 
-    sys.set(
-        "has_command",
-        lua.create_function(|_, cmd: String| Ok(has_command(&cmd)))?,
+    registry.register_var(
+        &sys,
+        LuaApiItem {
+            table: "sys",
+            name: "username",
+            description: "Returns the name of the currently logged-in user.",
+            kind: LuaItemKind::Variable {
+                type_name: "string",
+            },
+        },
+        get_username(),
+    )?;
+
+    registry.register_var(
+        &sys,
+        LuaApiItem {
+            table: "sys",
+            name: "hostname",
+            description: "Returns the hostname of the current machine.",
+            kind: LuaItemKind::Variable {
+                type_name: "string",
+            },
+        },
+        get_hostname(),
+    )?;
+
+    registry.register_func(
+        &sys,
+        lua,
+        LuaApiItem {
+            table: "sys",
+            name: "has_command",
+            description: "Checks if a command is available in the system PATH.",
+            kind: LuaItemKind::Function {
+                params: &[("cmd", "string")],
+                returns: "boolean",
+            },
+        },
+        |_, cmd: String| Ok(has_command(&cmd)),
     )?;
 
     let run_cmd_dir = paths.config_dir.clone();
-    sys.set(
-        "run_command",
-        lua.create_function(move |_, (cmd, args): (String, Vec<String>)| {
-            run_command(&cmd, args, &run_cmd_dir)
-        })?,
+    registry.register_func(
+        &sys,
+        lua,
+        LuaApiItem {
+            table: "sys",
+            name: "run_command",
+            description: "Executes a shell command and returns its standard output.",
+            kind: LuaItemKind::Function {
+                params: &[("cmd", "string"), ("args", "table")],
+                returns: "string",
+            },
+        },
+        move |_, (cmd, args): (String, Vec<String>)| run_command(&cmd, args, &run_cmd_dir),
     )?;
     icefield.set("sys", sys)?;
 
     // --- Sub-table: icefield.fs ---
     let fs = lua.create_table()?;
     let cfg_dir = paths.config_dir.clone();
-    fs.set(
-        "config_dir",
-        lua.create_function(move |_, ()| {
-            Ok(cfg_dir.to_string_lossy().into_owned())
-        })?,
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "config_dir",
+            description: "Returns the absolute path to the Icefield configuration directory.",
+            kind: LuaItemKind::Function { params: &[], returns: "string" },
+        },
+        move |_, ()| Ok(cfg_dir.to_string_lossy().into_owned()),
     )?;
 
     let cch_dir = paths.cache_dir.clone();
-    fs.set(
-        "cache_dir",
-        lua.create_function(move |_, ()| {
-            Ok(cch_dir.to_string_lossy().into_owned())
-        })?,
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "cache_dir",
+            description: "Returns the absolute path to the Icefield cache directory.",
+            kind: LuaItemKind::Function { params: &[], returns: "string" },
+        },
+        move |_, ()| Ok(cch_dir.to_string_lossy().into_owned()),
     )?;
 
-    fs.set("home_dir", lua.create_function(|_, ()| Ok(get_home_dir()))?)?;
-
-    fs.set(
-        "exists",
-        lua.create_function(|_, path: String| Ok(path_exists(&path)))?,
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "home_dir",
+            description: "Returns the absolute path to the current user's home directory.",
+            kind: LuaItemKind::Function { params: &[], returns: "string" },
+        },
+        |_, ()| Ok(get_home_dir()),
     )?;
-    fs.set(
-        "expand",
-        lua.create_function(|_, path: String| Ok(path_expand(&path)))?,
+
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "exists",
+            description: "Checks if a file or directory exists at the given path.",
+            kind: LuaItemKind::Function { params: &[("path", "string")], returns: "boolean" },
+        },
+        |_, path: String| Ok(path_exists(&path)),
+    )?;
+
+    registry.register_func(
+        &fs,
+        lua,
+        LuaApiItem {
+            table: "fs",
+            name: "expand",
+            description: "Expands tildes (`~`) and environment variables in the path.",
+            kind: LuaItemKind::Function { params: &[("path", "string")], returns: "string" },
+        },
+        |_, path: String| Ok(path_expand(&path)),
     )?;
     icefield.set("fs", fs)?;
 
     // --- Sub-table: icefield.format ---
-    register_format_helpers(&icefield, lua)?;
+    register_format_helpers(&icefield, lua, registry)?;
 
     // --- Sub-table: icefield.fetch ---
-    register_fetchers(&icefield, lua, paths)?;
+    register_fetchers(&icefield, lua, paths, registry)?;
 
     // --- Sub-table: icefield.drv ---
-    register_drv_constructors(&icefield, lua)?;
+    register_drv_constructors(&icefield, lua, registry)?;
 
     // --- Sub-table: icefield.lib ---
     let lib = lua.create_table()?;
-    lib.set(
-        "fake_hash",
-        lua.create_function(|_, ()| {
-            Ok("0000000000000000000000000000000000000000000000000000")
-        })?,
+    registry.register_func(
+        &lib,
+        lua,
+        LuaApiItem {
+            table: "lib",
+            name: "fake_hash",
+            description: "Returns a dummy 52-character Nix-style Base32 hash, useful for bootstrapping new derivations.",
+            kind: LuaItemKind::Function { params: &[], returns: "string" },
+        },
+        |_, ()| Ok("0000000000000000000000000000000000000000000000000000"),
     )?;
+
+    // Manually register metadata for string.trim (which is injected via bootstrap_lua_env)
+    registry.items.push(LuaApiItem {
+        table: "lib.string",
+        name: "trim",
+        description: "Removes leading and trailing whitespace from a string.",
+        kind: LuaItemKind::Function {
+            params: &[("s", "string")],
+            returns: "string",
+        },
+    });
+
     icefield.set("lib", lib)?;
 
     // --- Finalize: icefield table ---
@@ -116,7 +224,11 @@ fn wrap_fetch_err(e: anyhow::Error, kind: &str) -> mlua::Error {
 ///
 /// These constructors add a `"type"` tag to the configuration table,
 /// allowing Rust to deserialize it into the correct `DerivationKind`.
-fn register_drv_constructors(icefield: &Table, lua: &Lua) -> Result<()> {
+fn register_drv_constructors(
+    icefield: &Table,
+    lua: &Lua,
+    registry: &mut ApiRegistry,
+) -> Result<()> {
     let drv = lua.create_table()?;
 
     let kinds = [
@@ -133,11 +245,27 @@ fn register_drv_constructors(icefield: &Table, lua: &Lua) -> Result<()> {
     ];
 
     for (name, kind_tag) in kinds {
-        let func = lua.create_function(move |_, args: Table| {
-            args.set("type", kind_tag)?;
-            Ok(args)
-        })?;
-        drv.set(name, func)?;
+        let desc = Box::leak(
+            format!("Constructs a new '{}' derivation.", name)
+                .into_boxed_str(),
+        );
+        registry.register_func(
+            &drv,
+            lua,
+            LuaApiItem {
+                table: "drv",
+                name,
+                description: desc,
+                kind: LuaItemKind::Function {
+                    params: &[("args", "table")],
+                    returns: "table",
+                },
+            },
+            move |_, args: Table| {
+                args.set("type", kind_tag)?;
+                Ok(args)
+            },
+        )?;
     }
 
     icefield.set("drv", drv)?;
@@ -152,15 +280,23 @@ fn register_fetchers(
     icefield: &Table,
     lua: &Lua,
     paths: &paths::AppPaths,
+    registry: &mut ApiRegistry,
 ) -> Result<()> {
     let fetch = lua.create_table()?;
     let sd = paths.store_dir();
 
     // fetch.url({ url, hash, name? })
     let s = sd.clone();
-    fetch.set(
-        "url",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "url",
+            description: "Downloads a file from a URL, verifies its hash, and stores it in the local cache. Returns the local absolute path.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
@@ -169,14 +305,21 @@ fn register_fetchers(
                 .fetch_url(&url, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "URL"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
     // fetch.tarball({ url, hash, name? })
     let s = sd.clone();
-    fetch.set(
-        "tarball",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "tarball",
+            description: "Downloads and extracts a tarball (.tar.gz), verifies its hash, and returns the local absolute path to the extracted directory.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
@@ -185,14 +328,21 @@ fn register_fetchers(
                 .fetch_tarball(&url, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "tarball"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
     // fetch.zip({ url, hash, name? })
     let s = sd.clone();
-    fetch.set(
-        "zip",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "zip",
+            description: "Downloads and extracts a ZIP archive, verifies its hash, and returns the local absolute path to the extracted directory.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let url: String = args.get("url")?;
             let hash: String = args.get("hash")?;
@@ -201,14 +351,21 @@ fn register_fetchers(
                 .fetch_zip(&url, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "ZIP"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
-    // fetch.github({ owner, repo, rev, hash, host?, name? })
+    // fetch.from_github({ owner, repo, rev, hash, host?, name? })
     let s = sd.clone();
-    fetch.set(
-        "github",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "from_github",
+            description: "Fetches a repository archive from GitHub at a specific revision.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
@@ -220,14 +377,21 @@ fn register_fetchers(
                 .fetch_from_github(host, &owner, &repo, &rev, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "GitHub"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
-    // fetch.gitlab({ owner, repo, rev, hash, host?, name? })
+    // fetch.from_gitlab({ owner, repo, rev, hash, host?, name? })
     let s = sd.clone();
-    fetch.set(
-        "gitlab",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "from_gitlab",
+            description: "Fetches a repository archive from GitLab at a specific revision.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
@@ -239,14 +403,21 @@ fn register_fetchers(
                 .fetch_from_gitlab(host, &owner, &repo, &rev, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "GitLab"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
-    // fetch.gitea({ host, owner, repo, rev, hash, name? })
+    // fetch.from_gitea({ host, owner, repo, rev, hash, name? })
     let s = sd.clone();
-    fetch.set(
-        "gitea",
-        lua.create_function(move |_, args: Table| {
+    registry.register_func(
+        &fetch,
+        lua,
+        LuaApiItem {
+            table: "fetch",
+            name: "from_gitea",
+            description: "Fetches a repository archive from Gitea/Forgejo at a specific revision.",
+            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+        },
+        move |_, args: Table| {
             let store = Store::new(&s);
             let host: Option<String> = args.get("host")?;
             let owner: String = args.get("owner")?;
@@ -258,7 +429,7 @@ fn register_fetchers(
                 .fetch_from_gitea(host, &owner, &repo, &rev, &hash, name)
                 .map_err(|e| wrap_fetch_err(e, "Gitea"))?;
             Ok(path.to_string_lossy().into_owned())
-        })?,
+        },
     )?;
 
     icefield.set("fetch", fetch)?;
@@ -285,67 +456,125 @@ fn bootstrap_lua_env(lua: &Lua) -> Result<()> {
 }
 
 /// Registers data serialization and parsing helpers in the `icefield.format` table.
-fn register_format_helpers(icefield: &Table, lua: &Lua) -> Result<()> {
+fn register_format_helpers(
+    icefield: &Table,
+    lua: &Lua,
+    registry: &mut ApiRegistry,
+) -> Result<()> {
     let format = lua.create_table()?;
 
     // JSON
-    let json = lua.create_table()?;
-    json.set(
-        "parse",
-        lua.create_function(|lua, s: String| {
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "from_json",
+            description: "Parses a JSON string into a Lua table.",
+            kind: LuaItemKind::Function {
+                params: &[("s", "string")],
+                returns: "table",
+            },
+        },
+        |lua: &Lua, s: String| {
             let v = parse_json(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
-        })?,
+        },
     )?;
-    json.set(
-        "generate",
-        lua.create_function(|lua, t: mlua::Value| {
+
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "to_json",
+            description: "Generates a pretty-printed JSON string from a Lua table.",
+            kind: LuaItemKind::Function { params: &[("t", "table")], returns: "string" },
+        },
+        |lua: &Lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             Ok(serialize_json(&v))
-        })?,
+        },
     )?;
-    format.set("json", json)?;
 
     // TOML
-    let toml = lua.create_table()?;
-    toml.set(
-        "parse",
-        lua.create_function(|lua, s: String| {
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "from_toml",
+            description: "Parses a TOML string into a Lua table.",
+            kind: LuaItemKind::Function {
+                params: &[("s", "string")],
+                returns: "table",
+            },
+        },
+        |lua: &Lua, s: String| {
             let v = parse_toml(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
-        })?,
+        },
     )?;
-    toml.set(
-        "generate",
-        lua.create_function(|lua, t: mlua::Value| {
+
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "to_toml",
+            description: "Generates a TOML string from a Lua table.",
+            kind: LuaItemKind::Function {
+                params: &[("t", "table")],
+                returns: "string",
+            },
+        },
+        |lua: &Lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             serialize_toml(&v)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
-        })?,
+        },
     )?;
-    format.set("toml", toml)?;
 
     // YAML
-    let yaml = lua.create_table()?;
-    yaml.set(
-        "parse",
-        lua.create_function(|lua, s: String| {
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "from_yaml",
+            description: "Parses a YAML string into a Lua table.",
+            kind: LuaItemKind::Function {
+                params: &[("s", "string")],
+                returns: "table",
+            },
+        },
+        |lua: &Lua, s: String| {
             let v = parse_yaml(&s)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             lua.to_value(&v)
-        })?,
+        },
     )?;
-    yaml.set(
-        "generate",
-        lua.create_function(|lua, t: mlua::Value| {
+
+    registry.register_func(
+        &format,
+        lua,
+        LuaApiItem {
+            table: "format",
+            name: "to_yaml",
+            description: "Generates a YAML string from a Lua table.",
+            kind: LuaItemKind::Function {
+                params: &[("t", "table")],
+                returns: "string",
+            },
+        },
+        |lua: &Lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
             serialize_yaml(&v)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))
-        })?,
+        },
     )?;
-    format.set("yaml", yaml)?;
 
     icefield.set("format", format)?;
     Ok(())
@@ -551,7 +780,8 @@ mod tests {
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
         let config_dir = dir.path().join("cfg");
         let paths = paths::AppPaths::resolve(Some(config_dir));
-        register(&lua, &paths)?;
+        let mut registry = crate::lua_registry::ApiRegistry::new();
+        register(&lua, &paths, &mut registry)?;
 
         // Check sys
         let os: String = lua.load("icefield.sys.os").eval()?;
@@ -563,7 +793,7 @@ mod tests {
 
         // Check format
         let json: String =
-            lua.load("icefield.format.json.generate({a=1})").eval()?;
+            lua.load("icefield.format.to_json({a=1})").eval()?;
         assert!(json.contains("\"a\": 1"));
 
         // Check lib.string.trim
