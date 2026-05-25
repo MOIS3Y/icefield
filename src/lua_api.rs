@@ -41,8 +41,17 @@ pub fn register(
         LuaApiItem {
             table: "sys",
             name: "os",
-            description: "Returns the name of the operating system ('linux', 'macos', or 'unix').",
-            kind: LuaItemKind::Variable { type_name: "string" },
+            description: "The name of the current operating system.",
+            example: Some(
+                r#"
+                if icefield.sys.os == "linux" then
+                  -- linux specific config
+                end
+            "#,
+            ),
+            kind: LuaItemKind::Variable {
+                type_name: "\"linux\"|\"macos\"|\"unix\"",
+            },
         },
         get_os(),
     )?;
@@ -52,7 +61,8 @@ pub fn register(
         LuaApiItem {
             table: "sys",
             name: "username",
-            description: "Returns the name of the currently logged-in user.",
+            description: "The name of the currently logged-in user.",
+            example: Some(r#"print("Hello, " .. icefield.sys.username)"#),
             kind: LuaItemKind::Variable {
                 type_name: "string",
             },
@@ -65,7 +75,14 @@ pub fn register(
         LuaApiItem {
             table: "sys",
             name: "hostname",
-            description: "Returns the hostname of the current machine.",
+            description: "The network hostname of the current machine.",
+            example: Some(
+                r#"
+                if icefield.sys.hostname == "workstation" then
+                  -- enable heavy tools
+                end
+            "#,
+            ),
             kind: LuaItemKind::Variable {
                 type_name: "string",
             },
@@ -79,7 +96,17 @@ pub fn register(
         LuaApiItem {
             table: "sys",
             name: "has_command",
-            description: "Checks if a command is available in the system PATH.",
+            description: r#"
+                Checks if a command-line tool is installed and available
+                in the system PATH.
+            "#,
+            example: Some(
+                r#"
+                if icefield.sys.has_command("git") then
+                  -- git related logic
+                end
+            "#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("cmd", "string")],
                 returns: "boolean",
@@ -88,20 +115,91 @@ pub fn register(
         |_, cmd: String| Ok(has_command(&cmd)),
     )?;
 
-    let run_cmd_dir = paths.config_dir.clone();
     registry.register_func(
         &sys,
         lua,
         LuaApiItem {
             table: "sys",
-            name: "run_command",
-            description: "Executes a shell command and returns its standard output.",
+            name: "spawn",
+            description: r#"
+                Executes an external command and returns its standard output.
+                The command is executed directly (without a shell) and runs
+                relative to your configuration directory.
+            "#,
+            example: Some(
+                r#"
+                -- Simple command:
+                local out = icefield.sys.spawn("hostname")
+
+                -- Command with arguments:
+                local branch = icefield.sys.spawn({
+                    "git", "branch", "--show-current"
+                })
+            "#,
+            ),
             kind: LuaItemKind::Function {
-                params: &[("cmd", "string"), ("args", "table")],
+                params: &[("cmd_or_args", "string|table")],
                 returns: "string",
             },
         },
-        move |_, (cmd, args): (String, Vec<String>)| run_command(&cmd, args, &run_cmd_dir),
+        {
+            let run_cmd_dir = paths.config_dir.clone();
+            move |_, value: mlua::Value| {
+                let (cmd, args) = match value {
+                    mlua::Value::String(s) => {
+                        (s.to_str()?.to_string(), vec![])
+                    }
+                    mlua::Value::Table(t) => {
+                        let cmd: String = t.get(1)?;
+                        let args: Vec<String> = t
+                            .sequence_values::<String>()
+                            .skip(1)
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        (cmd, args)
+                    }
+                    _ => {
+                        return Err(mlua::Error::RuntimeError(
+                            "spawn expects a string or a table".into(),
+                        ));
+                    }
+                };
+                run_command(&cmd, args, &run_cmd_dir)
+            }
+        },
+    )?;
+
+    registry.register_func(
+        &sys,
+        lua,
+        LuaApiItem {
+            table: "sys",
+            name: "spawn_sh",
+            description: r#"
+                Executes a command string via the system shell ('sh -c')
+                and returns its standard output.
+                Useful for using pipes, redirects, and environment variables.
+                The command runs relative to your configuration directory.
+            "#,
+            example: Some(
+                r#"
+                local count = icefield.sys.spawn_sh("ls -1 | wc -l"):trim()
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("cmd_line", "string")],
+                returns: "string",
+            },
+        },
+        {
+            let run_cmd_dir = paths.config_dir.clone();
+            move |_, cmd_line: String| {
+                run_command(
+                    "sh",
+                    vec!["-c".to_string(), cmd_line],
+                    &run_cmd_dir,
+                )
+            }
+        },
     )?;
     icefield.set("sys", sys)?;
 
@@ -114,8 +212,19 @@ pub fn register(
         LuaApiItem {
             table: "fs",
             name: "config_dir",
-            description: "Returns the absolute path to the Icefield configuration directory.",
-            kind: LuaItemKind::Function { params: &[], returns: "string" },
+            description: r#"
+                Returns the absolute path to the directory containing
+                the user's Icefield configuration.
+            "#,
+            example: Some(
+                r#"
+                local my_file = icefield.fs.config_dir() .. "/files/config.txt"
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[],
+                returns: "string",
+            },
         },
         move |_, ()| Ok(cfg_dir.to_string_lossy().into_owned()),
     )?;
@@ -128,7 +237,13 @@ pub fn register(
             table: "fs",
             name: "cache_dir",
             description: "Returns the absolute path to the Icefield cache directory.",
-            kind: LuaItemKind::Function { params: &[], returns: "string" },
+            example: Some(r#"
+                local tmp = icefield.fs.cache_dir() .. "/temp_output"
+            "#),
+            kind: LuaItemKind::Function {
+                params: &[],
+                returns: "string",
+            },
         },
         move |_, ()| Ok(cch_dir.to_string_lossy().into_owned()),
     )?;
@@ -140,7 +255,11 @@ pub fn register(
             table: "fs",
             name: "home_dir",
             description: "Returns the absolute path to the current user's home directory.",
-            kind: LuaItemKind::Function { params: &[], returns: "string" },
+            example: Some(r#"local ssh_dir = icefield.fs.home_dir() .. "/.ssh""#),
+            kind: LuaItemKind::Function {
+                params: &[],
+                returns: "string",
+            },
         },
         |_, ()| Ok(get_home_dir()),
     )?;
@@ -152,7 +271,15 @@ pub fn register(
             table: "fs",
             name: "exists",
             description: "Checks if a file or directory exists at the given path.",
-            kind: LuaItemKind::Function { params: &[("path", "string")], returns: "boolean" },
+            example: Some(r#"
+                if icefield.fs.exists("/etc/shadow") then
+                  -- do something
+                end
+            "#),
+            kind: LuaItemKind::Function {
+                params: &[("path", "string")],
+                returns: "boolean",
+            },
         },
         |_, path: String| Ok(path_exists(&path)),
     )?;
@@ -163,8 +290,14 @@ pub fn register(
         LuaApiItem {
             table: "fs",
             name: "expand",
-            description: "Expands tildes (`~`) and environment variables in the path.",
-            kind: LuaItemKind::Function { params: &[("path", "string")], returns: "string" },
+            description: "Expands tildes (`~`) and environment variables in the path string.",
+            example: Some(r#"
+                local path = icefield.fs.expand("~/.config/$EDITOR/config")
+            "#),
+            kind: LuaItemKind::Function {
+                params: &[("path", "string")],
+                returns: "string",
+            },
         },
         |_, path: String| Ok(path_expand(&path)),
     )?;
@@ -187,8 +320,15 @@ pub fn register(
         LuaApiItem {
             table: "lib",
             name: "fake_hash",
-            description: "Returns a dummy 52-character Nix-style Base32 hash, useful for bootstrapping new derivations.",
-            kind: LuaItemKind::Function { params: &[], returns: "string" },
+            description: r#"
+                Returns a dummy 52-character Nix-style Base32 hash,
+                useful for bootstrapping new derivations.
+            "#,
+            example: Some(r#"local h = icefield.lib.fake_hash()"#),
+            kind: LuaItemKind::Function {
+                params: &[],
+                returns: "string",
+            },
         },
         |_, ()| Ok("0000000000000000000000000000000000000000000000000000"),
     )?;
@@ -198,6 +338,7 @@ pub fn register(
         table: "lib.string",
         name: "trim",
         description: "Removes leading and trailing whitespace from a string.",
+        example: Some(r#"local clean = str:trim()"#),
         kind: LuaItemKind::Function {
             params: &[("s", "string")],
             returns: "string",
@@ -246,9 +387,121 @@ fn register_drv_constructors(
 
     for (name, kind_tag) in kinds {
         let desc = Box::leak(
-            format!("Constructs a new '{}' derivation.", name)
+            format!("Constructs a new managed '{}' derivation.", name)
                 .into_boxed_str(),
         );
+        let ex = match name {
+            "toml" => Some(
+                r#"
+                icefield.drv.toml({
+                  name = "app-config",
+                  enable = true,
+                  target = "~/.config/app.toml",
+                  source = {
+                    theme = "dark",
+                    editor = { line_numbers = "relative" }
+                  }
+                })
+            "#,
+            ),
+            "json" => Some(
+                r#"
+                icefield.drv.json({
+                  name = "vscode-settings",
+                  enable = true,
+                  target = "~/.config/Code/User/settings.json",
+                  source = { ["editor.fontSize"] = 14 }
+                })
+            "#,
+            ),
+            "yaml" => Some(
+                r#"
+                icefield.drv.yaml({
+                  name = "docker-compose",
+                  enable = true,
+                  target = "~/projects/app/docker-compose.yml",
+                  source = { version = "3.8", services = { ... } }
+                })
+            "#,
+            ),
+            "ini" => Some(
+                r#"
+                icefield.drv.ini({
+                  name = "git-config",
+                  enable = true,
+                  target = "~/.gitconfig",
+                  source = {
+                    user = { name = "John", email = "john@example.com" }
+                  }
+                })
+            "#,
+            ),
+            "env" => Some(
+                r#"
+                icefield.drv.env({
+                  name = "env-file",
+                  enable = true,
+                  target = "~/.env",
+                  source = { API_KEY = "secret", DEBUG = "true" }
+                })
+            "#,
+            ),
+            "copy" => Some(
+                r#"
+                icefield.drv.copy({
+                  name = "wallpaper",
+                  enable = true,
+                  target = "~/Pictures/bg.jpg",
+                  source_path = icefield.fs.config_dir() .. "/files/wall.jpg"
+                })
+            "#,
+            ),
+            "symlink" => Some(
+                r#"
+                icefield.drv.symlink({
+                  name = "scripts",
+                  enable = true,
+                  target = "~/bin/tool",
+                  source_path = "/absolute/path/to/tool"
+                })
+            "#,
+            ),
+            "text" => Some(
+                r##"
+                icefield.drv.text({
+                  name = "script",
+                  enable = true,
+                  target = "~/bin/hello",
+                  source = "#!/bin/sh\necho Hello",
+                  mode = "755"
+                })
+            "##,
+            ),
+            "template" => Some(
+                r#"
+                icefield.drv.template({
+                  name = "bashrc",
+                  enable = true,
+                  target = "~/.bashrc",
+                  template_path = icefield.fs.config_dir() .. "/tpl/bashrc.j2",
+                  variables = { user = "stepan" }
+                })
+            "#,
+            ),
+            "scss" => Some(
+                r##"
+                icefield.drv.scss({
+                  name = "waybar-style",
+                  enable = true,
+                  target = "~/.config/waybar/style.css",
+                  template_path = icefield.fs.config_dir() .. "/css/style.scss",
+                  variables = { primary_color = "#ff0000" }
+                })
+            "##,
+            ),
+            _ => None,
+        };
+
         registry.register_func(
             &drv,
             lua,
@@ -256,6 +509,7 @@ fn register_drv_constructors(
                 table: "drv",
                 name,
                 description: desc,
+                example: ex,
                 kind: LuaItemKind::Function {
                     params: &[("args", "table")],
                     returns: "table",
@@ -293,8 +547,22 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "url",
-            description: "Downloads a file from a URL, verifies its hash, and stores it in the local cache. Returns the local absolute path.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: r#"
+                Downloads a file from a URL, verifies its hash,
+                and stores it in the local content-addressable store.
+            "#,
+            example: Some(
+                r#"
+                local path = icefield.fetch.url({
+                  url = "https://example.com/file.txt",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -316,8 +584,22 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "tarball",
-            description: "Downloads and extracts a tarball (.tar.gz), verifies its hash, and returns the local absolute path to the extracted directory.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: r#"
+                Downloads and extracts a tarball (.tar.gz), verifies its hash,
+                and returns the path to the extracted directory.
+            "#,
+            example: Some(
+                r#"
+                local dir = icefield.fetch.tarball({
+                  url = "https://example.com/archive.tar.gz",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -339,8 +621,22 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "zip",
-            description: "Downloads and extracts a ZIP archive, verifies its hash, and returns the local absolute path to the extracted directory.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: r#"
+                Downloads and extracts a ZIP archive, verifies its hash,
+                and returns the local absolute path to the extracted directory.
+            "#,
+            example: Some(
+                r#"
+                local dir = icefield.fetch.zip({
+                  url = "https://example.com/archive.zip",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -362,8 +658,24 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "from_github",
-            description: "Fetches a repository archive from GitHub at a specific revision.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: r#"
+                Fetches a repository archive from GitHub (or compatible host)
+                at a specific revision (branch, tag, or commit hash).
+            "#,
+            example: Some(
+                r#"
+                local nvim_chad = icefield.fetch.from_github({
+                  owner = "NvChad",
+                  repo = "starter",
+                  rev = "main",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -388,8 +700,21 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "from_gitlab",
-            description: "Fetches a repository archive from GitLab at a specific revision.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: "Fetches a repository archive from GitLab.",
+            example: Some(
+                r#"
+                local src = icefield.fetch.from_gitlab({
+                  owner = "gitlab-org",
+                  repo = "gitlab-shell",
+                  rev = "main",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -414,8 +739,24 @@ fn register_fetchers(
         LuaApiItem {
             table: "fetch",
             name: "from_gitea",
-            description: "Fetches a repository archive from Gitea/Forgejo at a specific revision.",
-            kind: LuaItemKind::Function { params: &[("args", "table")], returns: "string" },
+            description: r#"
+                Fetches a repository archive from Gitea or Forgejo instances.
+            "#,
+            example: Some(
+                r#"
+                local src = icefield.fetch.from_gitea({
+                  host = "codeberg.org",
+                  owner = "user",
+                  repo = "repo",
+                  rev = "main",
+                  hash = "..."
+                })
+            "#,
+            ),
+            kind: LuaItemKind::Function {
+                params: &[("args", "table")],
+                returns: "string",
+            },
         },
         move |_, args: Table| {
             let store = Store::new(&s);
@@ -471,6 +812,9 @@ fn register_format_helpers(
             table: "format",
             name: "from_json",
             description: "Parses a JSON string into a Lua table.",
+            example: Some(
+                r#"local data = icefield.format.from_json('{"a": 1}')"#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("s", "string")],
                 returns: "table",
@@ -490,7 +834,11 @@ fn register_format_helpers(
             table: "format",
             name: "to_json",
             description: "Generates a pretty-printed JSON string from a Lua table.",
-            kind: LuaItemKind::Function { params: &[("t", "table")], returns: "string" },
+            example: Some(r#"local str = icefield.format.to_json({ key = "value" })"#),
+            kind: LuaItemKind::Function {
+                params: &[("t", "table")],
+                returns: "string",
+            },
         },
         |lua: &Lua, t: mlua::Value| {
             let v: serde_json::Value = lua.from_value(t)?;
@@ -506,6 +854,9 @@ fn register_format_helpers(
             table: "format",
             name: "from_toml",
             description: "Parses a TOML string into a Lua table.",
+            example: Some(
+                r#"local data = icefield.format.from_toml("key = 'value'")"#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("s", "string")],
                 returns: "table",
@@ -525,6 +876,13 @@ fn register_format_helpers(
             table: "format",
             name: "to_toml",
             description: "Generates a TOML string from a Lua table.",
+            example: Some(
+                r#"
+                local str = icefield.format.to_toml({
+                    editor = { bar = true }
+                })
+            "#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("t", "table")],
                 returns: "string",
@@ -545,6 +903,9 @@ fn register_format_helpers(
             table: "format",
             name: "from_yaml",
             description: "Parses a YAML string into a Lua table.",
+            example: Some(
+                r#"local data = icefield.format.from_yaml("foo: bar")"#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("s", "string")],
                 returns: "table",
@@ -564,6 +925,11 @@ fn register_format_helpers(
             table: "format",
             name: "to_yaml",
             description: "Generates a YAML string from a Lua table.",
+            example: Some(
+                r#"
+                local str = icefield.format.to_yaml({ list = { 1, 2 } })
+            "#,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("t", "table")],
                 returns: "string",
