@@ -389,3 +389,100 @@ impl Store {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_extract_name() {
+        assert_eq!(
+            Store::extract_name("https://example.com/file.txt"),
+            "file.txt"
+        );
+        assert_eq!(
+            Store::extract_name("https://example.com/archive.tar.gz"),
+            "archive.tar.gz"
+        );
+        assert_eq!(
+            Store::extract_name("https://example.com/some/path/"),
+            "artifact"
+        ); // ends with slash
+        assert_eq!(Store::extract_name("https://example.com"), "example.com"); // no path
+    }
+
+    #[test]
+    fn test_get_paths() {
+        let store = Store::new(Path::new("/cache/store"));
+
+        let base = store.get_base_dir("1234567890abcdef", "my-repo");
+        assert_eq!(
+            base,
+            PathBuf::from("/cache/store/1234567890abcdef-my-repo")
+        );
+
+        let content = store.get_content_path("1234567890abcdef", "my-repo");
+        assert_eq!(
+            content,
+            PathBuf::from("/cache/store/1234567890abcdef-my-repo/out")
+        );
+    }
+
+    #[test]
+    fn test_strip_single_subdir_success() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+
+        // Setup: root/wrapper_dir/file.txt
+        let wrapper = root.join("wrapper_dir");
+        fs::create_dir(&wrapper)?;
+        fs::write(wrapper.join("file.txt"), "hello")?;
+        fs::create_dir(wrapper.join("inner_dir"))?;
+
+        // Run
+        Store::strip_single_subdir(root)?;
+
+        // Assert: wrapper_dir is gone, file.txt and inner_dir are at root
+        assert!(!wrapper.exists());
+        assert!(root.join("file.txt").exists());
+        assert!(root.join("inner_dir").is_dir());
+        assert_eq!(fs::read_to_string(root.join("file.txt"))?, "hello");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_strip_single_subdir_no_action_multiple_items() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+
+        // Setup: root/dir1 and root/dir2
+        fs::create_dir(root.join("dir1"))?;
+        fs::create_dir(root.join("dir2"))?;
+
+        Store::strip_single_subdir(root)?;
+
+        // Assert: Both still exist
+        assert!(root.join("dir1").exists());
+        assert!(root.join("dir2").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_strip_single_subdir_no_action_single_file() -> Result<()> {
+        let dir = tempdir()?;
+        let root = dir.path();
+
+        // Setup: root/just_a_file.txt
+        fs::write(root.join("just_a_file.txt"), "hello")?;
+
+        Store::strip_single_subdir(root)?;
+
+        // Assert: File is still there
+        assert!(root.join("just_a_file.txt").exists());
+
+        Ok(())
+    }
+}
