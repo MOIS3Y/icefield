@@ -108,13 +108,10 @@ impl Switcher {
             let is_forced = global_force || der.meta.force.unwrap_or(false);
 
             match &der.kind {
-                DerivationKind::Symlink { source_path } => {
-                    match self.apply_symlink(
-                        target,
-                        source_path,
-                        &der.meta,
-                        is_forced,
-                    )? {
+                DerivationKind::Symlink { source } => {
+                    match self
+                        .apply_symlink(target, source, &der.meta, is_forced)?
+                    {
                         ChangeKind::Created => created += 1,
                         ChangeKind::Updated => updated += 1,
                         ChangeKind::None => skipped += 1,
@@ -122,11 +119,11 @@ impl Switcher {
                     new_state.add_file(
                         target.clone(),
                         der.meta.name.clone(),
-                        format!("symlink:{}", source_path.display()),
+                        format!("symlink:{}", source.display()),
                     );
                 }
-                DerivationKind::Copy { source_path } => {
-                    let hash = hash_file(source_path)?;
+                DerivationKind::Copy { source } => {
+                    let hash = hash_file(source)?;
                     let exists_on_disk = target.exists();
                     let hash_changed = current_state
                         .managed_files
@@ -135,7 +132,7 @@ impl Switcher {
                         != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
-                        self.copy_file(source_path, target, &der.meta)?;
+                        self.copy_file(source, target, &der.meta)?;
                         if exists_on_disk {
                             updated += 1;
                         } else {
@@ -657,21 +654,21 @@ mod tests {
         paths.data_dir = data_dir;
 
         let target_path = dir.path().join("link");
-        let source_path = dir.path().join("source.txt");
-        fs::write(&source_path, "content")?;
+        let source = dir.path().join("source.txt");
+        fs::write(&source, "content")?;
 
         let switcher = Switcher::new(&paths);
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Symlink {
-                source_path: source_path.clone(),
+                source: source.clone(),
             },
         }];
 
         switcher.apply(&derivations, false)?;
 
         assert!(fs::symlink_metadata(&target_path)?.file_type().is_symlink());
-        assert_eq!(fs::read_link(&target_path)?, source_path);
+        assert_eq!(fs::read_link(&target_path)?, source);
         Ok(())
     }
 }

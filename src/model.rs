@@ -79,14 +79,18 @@ pub enum DerivationKind {
     /// Renders a Tera (Jinja2-style) template.
     Template {
         /// Path to the template file.
-        template_path: PathBuf,
+        source: PathBuf,
+        /// Optional list of paths to other template files that can be included.
+        includes: Option<Vec<PathBuf>>,
         /// Variables to inject into the template.
         variables: serde_json::Value,
     },
     /// Compiles SCSS to CSS, supporting template variables.
     Scss {
         /// Path to the SCSS template file.
-        template_path: PathBuf,
+        source: PathBuf,
+        /// Optional list of paths to other template files that can be included.
+        includes: Option<Vec<PathBuf>>,
         /// Variables to inject into the SCSS template before compilation.
         variables: serde_json::Value,
     },
@@ -95,12 +99,12 @@ pub enum DerivationKind {
     /// Physically copies a file from the configuration repository to the target.
     Copy {
         /// Path to the source file in the configuration repository.
-        source_path: PathBuf,
+        source: PathBuf,
     },
     /// Creates a symbolic link to an existing file or directory.
     Symlink {
         /// The source path the link should point to.
-        source_path: PathBuf,
+        source: PathBuf,
     },
 }
 

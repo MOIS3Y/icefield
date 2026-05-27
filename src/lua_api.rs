@@ -515,7 +515,7 @@ fn register_drv_constructors(
                   name = "wallpaper",
                   enable = true,
                   target = "~/Pictures/bg.jpg",
-                  source_path = icefield.fs.config_dir() .. "/files/wall.jpg"
+                  source = icefield.fs.config_dir() .. "/files/wall.jpg"
                 })
             "#,
             ),
@@ -525,7 +525,7 @@ fn register_drv_constructors(
                   name = "scripts",
                   enable = true,
                   target = "~/bin/tool",
-                  source_path = "/absolute/path/to/tool"
+                  source = "/absolute/path/to/tool"
                 })
             "#,
             ),
@@ -546,7 +546,10 @@ fn register_drv_constructors(
                   name = "bashrc",
                   enable = true,
                   target = "~/.bashrc",
-                  template_path = icefield.fs.config_dir() .. "/tpl/bashrc.j2",
+                  source = icefield.fs.config_dir() .. "/tpl/bashrc.j2",
+                  includes = {
+                    icefield.fs.config_dir() .. "/tpl/aliases.j2"
+                  },
                   variables = { user = "stepan" }
                 })
             "#,
@@ -557,7 +560,7 @@ fn register_drv_constructors(
                   name = "waybar-style",
                   enable = true,
                   target = "~/.config/waybar/style.css",
-                  template_path = icefield.fs.config_dir() .. "/css/style.scss",
+                  source = icefield.fs.config_dir() .. "/css/style.scss",
                   variables = { primary_color = "#ff0000" }
                 })
             "##,

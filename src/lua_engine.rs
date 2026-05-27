@@ -226,7 +226,7 @@ mod tests {
                     name = "link",
                     enable = true,
                     target = "dummy/link",
-                    source_path = "/src/path"
+                    source = "/src/path"
                 })
             }
         "#;

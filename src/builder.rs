@@ -41,13 +41,15 @@ impl Builder {
             DerivationKind::Env { source } => Ok(Self::build_env(source)),
             DerivationKind::Text { source } => Ok(source.clone()),
             DerivationKind::Template {
-                template_path,
+                source,
+                includes,
                 variables,
-            } => Self::build_template(template_path, variables),
+            } => Self::build_template(source, includes.as_deref(), variables),
             DerivationKind::Scss {
-                template_path,
+                source,
+                includes,
                 variables,
-            } => Self::build_scss(template_path, variables),
+            } => Self::build_scss(source, includes.as_deref(), variables),
             DerivationKind::Copy { .. } => Ok(String::new()),
             DerivationKind::Symlink { .. } => {
                 Ok(String::new()) // Symlinks don't have content
@@ -114,10 +116,25 @@ impl Builder {
     /// syntax errors, or if the provided variables are invalid.
     fn build_template(
         path: &std::path::Path,
+        includes: Option<&[std::path::PathBuf]>,
         variables: &serde_json::Value,
     ) -> Result<String> {
         tracing::debug!("Rendering template: {:?}", path);
         let mut tera = tera::Tera::default();
+
+        if let Some(inc_paths) = includes {
+            for inc_path in inc_paths {
+                let name =
+                    inc_path.file_name().and_then(|n| n.to_str()).ok_or_else(
+                        || anyhow!("Invalid include path: {:?}", inc_path),
+                    )?;
+
+                tera.add_template_file(inc_path, Some(name)).with_context(
+                    || format!("Failed to include template: {:?}", inc_path),
+                )?;
+            }
+        }
+
         let template_content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read template: {:?}", path))?;
 
@@ -138,11 +155,12 @@ impl Builder {
     /// compilation encounters a syntax error.
     fn build_scss(
         path: &std::path::Path,
+        includes: Option<&[std::path::PathBuf]>,
         variables: &serde_json::Value,
     ) -> Result<String> {
         tracing::debug!("Compiling SCSS from template: {:?}", path);
         // First, render SCSS as a template to inject variables
-        let rendered_scss = Self::build_template(path, variables)?;
+        let rendered_scss = Self::build_template(path, includes, variables)?;
         // Then, compile SCSS to CSS
         grass::from_string(rendered_scss, &grass::Options::default())
             .map_err(|e| anyhow!("SCSS compilation failed: {}", e))
@@ -202,7 +220,7 @@ mod tests {
         write!(file, "Hello, {{{{ user_name }}}}")?;
 
         let variables = json!({ "user_name": "World" });
-        let content = Builder::build_template(file.path(), &variables)?;
+        let content = Builder::build_template(file.path(), None, &variables)?;
         assert_eq!(content, "Hello, World");
         Ok(())
     }
@@ -215,7 +233,7 @@ mod tests {
         write!(file, "$color: {{{{ color }}}}; body {{ color: $color; }}")?;
 
         let variables = json!({ "color": "red" });
-        let content = Builder::build_scss(file.path(), &variables)?;
+        let content = Builder::build_scss(file.path(), None, &variables)?;
         assert!(content.contains("color: red"));
         Ok(())
     }
