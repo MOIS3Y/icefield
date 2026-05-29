@@ -1,12 +1,13 @@
 //! Icefield: A declarative dotfile manager powered by Rust and Lua.
 //!
 //! This crate provides a CLI tool that allows users to define their system
-//! configuration in Lua and apply it atomically. It follows a three-phase
+//! configuration in Lua and apply it atomically. It follows a two-phase
 //! approach:
-//! 1. **Compute & Build**: Execute Lua to generate a graph of fully rendered derivations.
+//! 1. **Compute & Render**: Execute Lua to generate fully rendered derivations.
 //! 2. **Commit**: Synchronize the built content with the filesystem.
 
 mod cli;
+mod crypto;
 mod inspector;
 mod logging;
 mod lua;
@@ -15,7 +16,6 @@ mod paths;
 mod state;
 mod store;
 mod switcher;
-mod utils;
 
 use clap::Parser;
 use cli::{Cli, Commands};

@@ -1,8 +1,9 @@
-//! Common utility functions for Icefield.
+//! Cryptographic Utilities and Hashing.
 //!
 //! This module provides shared functionality for hashing content and files,
 //! which is essential for determining when a configuration file has changed
-//! and needs to be updated.
+//! and needs to be updated. It uses SHA-256 and encodes results in a
+//! human-friendly Nix-style Base32 format.
 
 use sha2::{Digest, Sha256};
 use std::fs::File;

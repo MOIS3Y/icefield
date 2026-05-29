@@ -4,8 +4,8 @@
 //! into a local store located in the application's cache directory.
 //! It ensures integrity by verifying SHA-256 hashes.
 
+use crate::crypto::hash_file;
 use crate::paths;
-use crate::utils::hash_file;
 use anyhow::{Context, Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::fs;

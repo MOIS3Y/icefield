@@ -4,10 +4,10 @@
 //! actual filesystem. It handles atomicity, privilege elevation (sudo/doas),
 //! permission management, and garbage collection of orphaned files.
 
+use crate::crypto::{hash_content, hash_file};
 use crate::model::{Derivation, DerivationKind};
 use crate::paths;
 use crate::state::State;
-use crate::utils::{hash_content, hash_file};
 use anyhow::{Context, Result, anyhow};
 use console::style;
 use indicatif::{ProgressBar, ProgressStyle};

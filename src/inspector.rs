@@ -4,9 +4,9 @@
 //! in `state.json` with the actual state of the filesystem, reporting any
 //! discrepancies (drift) to the user.
 
+use crate::crypto::hash_file;
 use crate::paths;
 use crate::state::State;
-use crate::utils::hash_file;
 use anyhow::Result;
 use console::style;
 use std::fs;
