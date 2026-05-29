@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod format;
 pub mod fs;
 pub mod lib;
+pub mod log;
 pub mod prelude;
 pub mod registry;
 pub mod render;
@@ -30,14 +31,15 @@ pub fn register(
 ) -> Result<()> {
     let icefield = lua.create_table()?;
 
-    sys::register(&icefield, lua, paths, registry)?;
-    fs::register(&icefield, lua, paths, registry)?;
-    format::register(&icefield, lua, registry)?;
-    fetch::register(&icefield, lua, paths, registry)?;
-    drv::register(&icefield, lua, registry)?;
-    lib::register(&icefield, lua, registry)?;
-    render::register(&icefield, lua, registry)?;
     color::register(&icefield, lua, registry)?;
+    drv::register(&icefield, lua, registry)?;
+    fetch::register(&icefield, lua, paths, registry)?;
+    format::register(&icefield, lua, registry)?;
+    fs::register(&icefield, lua, paths, registry)?;
+    lib::register(&icefield, lua, registry)?;
+    log::register(&icefield, lua, registry)?;
+    render::register(&icefield, lua, registry)?;
+    sys::register(&icefield, lua, paths, registry)?;
 
     // Register metadata for injected pure-Lua functions
     prelude::register(registry)?;
