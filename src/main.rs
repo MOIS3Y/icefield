@@ -6,6 +6,7 @@
 //! 1. **Compute & Render**: Execute Lua to generate fully rendered derivations.
 //! 2. **Commit**: Synchronize the built content with the filesystem.
 
+mod cleaner;
 mod cli;
 mod crypto;
 mod inspector;
@@ -18,6 +19,7 @@ mod store;
 mod switcher;
 
 use clap::Parser;
+use cleaner::Cleaner;
 use cli::{Cli, Commands};
 use console::style;
 use lua::engine::LuaEngine;
@@ -50,7 +52,7 @@ fn main() -> anyhow::Result<()> {
             if dry_run {
                 println!(
                     "{} {}",
-                    style("❄").blue(),
+                    style("?").blue(),
                     style("Dry run mode enabled. No changes will be made.")
                         .dim()
                 );
@@ -82,6 +84,21 @@ fn main() -> anyhow::Result<()> {
             let paths = paths::AppPaths::resolve(cli.config.clone());
             let _log_guard = logging::setup(cli.verbose, &paths);
             inspector::inspect(&paths)?;
+        }
+        Commands::Clean { target, dry_run } => {
+            let paths = paths::AppPaths::resolve(cli.config.clone());
+            let _log_guard = logging::setup(cli.verbose, &paths);
+
+            if dry_run {
+                println!(
+                    "{} {}",
+                    style("?").blue(),
+                    style("Dry run mode: No files will be deleted.").dim()
+                );
+            }
+
+            let cleaner = Cleaner::new(&paths, dry_run);
+            cleaner.execute(&target)?;
         }
     }
 

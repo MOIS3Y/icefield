@@ -34,8 +34,33 @@ pub enum Commands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Clean up Icefield state, store, and logs
+    Clean {
+        #[command(subcommand)]
+        target: CleanTarget,
+
+        /// Preview what would be deleted without actually removing anything
+        #[arg(short, long, global = true)]
+        dry_run: bool,
+    },
     /// Show information about managed files and current state
     Info,
     /// Generate EmmyLua stubs for IDE autocompletion
     Stubs,
+}
+
+#[derive(Subcommand)]
+pub enum CleanTarget {
+    /// Smart GC: Removes artifacts from the store that are not in the current config
+    Store {
+        /// Completely wipe the store, bypassing Smart GC
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Smart Uninstall: Removes managed files from the filesystem and clears state
+    State,
+    /// Truncates the central log file
+    Logs,
+    /// Complete reset: cleans state, wipes store, and clears logs
+    All,
 }
