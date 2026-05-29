@@ -2,7 +2,7 @@
 //!
 //! This module defines the structures that represent the "Desired State" of
 //! the system. These structures are deserialized from Lua tables and used
-//! throughout the build and commit phases.
+//! throughout the compute and commit phases.
 
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -15,10 +15,18 @@ use std::path::PathBuf;
 pub struct CommonMeta {
     /// A descriptive name for this derivation (used in logs and progress bars).
     pub name: String,
-    /// If false, the derivation is completely ignored and its target is garbage collected.
+
+    /// Whether this derivation is active.
+    ///
+    /// If false, the derivation is ignored during the Commit phase, and its
+    /// target path is marked for garbage collection. Note that Lua-side
+    /// computations (like rendering) passed to 'src' will still execute;
+    /// use Lua 'if' statements for maximum performance.
     pub enable: bool,
+
     /// The final destination path on the filesystem.
     pub dst: PathBuf,
+
     /// If true, always overwrite the file even if the content hash hasn't changed.
     pub force: Option<bool>,
 
