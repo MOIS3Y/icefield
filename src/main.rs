@@ -3,17 +3,13 @@
 //! This crate provides a CLI tool that allows users to define their system
 //! configuration in Lua and apply it atomically. It follows a three-phase
 //! approach:
-//! 1. **Compute**: Execute Lua to generate a graph of derivations.
-//! 2. **Build**: Render templates and serialize data into final content.
-//! 3. **Commit**: Synchronize the built content with the filesystem.
+//! 1. **Compute & Build**: Execute Lua to generate a graph of fully rendered derivations.
+//! 2. **Commit**: Synchronize the built content with the filesystem.
 
-mod builder;
 mod cli;
 mod inspector;
 mod logging;
-mod lua_api;
-mod lua_engine;
-mod lua_registry;
+mod lua;
 mod model;
 mod paths;
 mod state;
@@ -24,7 +20,7 @@ mod utils;
 use clap::Parser;
 use cli::{Cli, Commands};
 use console::style;
-use lua_engine::LuaEngine;
+use lua::engine::LuaEngine;
 use switcher::Switcher;
 
 /// Application entry point.
@@ -41,8 +37,8 @@ fn main() -> anyhow::Result<()> {
             // Generate Lua API stubs
             let paths = paths::AppPaths::resolve(None);
             let lua = mlua::Lua::new();
-            let mut registry = lua_registry::ApiRegistry::new();
-            lua_api::register(&lua, &paths, &mut registry)
+            let mut registry = lua::registry::ApiRegistry::new();
+            lua::register(&lua, &paths, &mut registry)
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
             println!("{}", registry.generate_stubs());
             return Ok(());
@@ -78,7 +74,7 @@ fn main() -> anyhow::Result<()> {
             // Phase 1: Compute (Lua -> Derivations)
             let derivations = LuaEngine::load_file(&paths)?;
 
-            // Phase 2 & 3: Build and Commit
+            // Phase 2: Commit
             let switcher = Switcher::new(&paths);
             switcher.apply(&derivations, force)?;
         }

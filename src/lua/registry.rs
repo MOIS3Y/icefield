@@ -141,6 +141,9 @@ impl ApiRegistry {
         // Build a list of all table paths, including intermediate ones.
         let mut table_paths = std::collections::HashSet::new();
         for item in &self.items {
+            if item.table.is_empty() {
+                continue;
+            }
             let mut current_path = String::new();
             for part in item.table.split('.') {
                 if current_path.is_empty() {
@@ -165,19 +168,23 @@ impl ApiRegistry {
         }
         out.push_str("icefield = {}\n\n");
 
+        // Generate top-level items (where table is empty)
+        let root_items = self.items.iter().filter(|i| i.table.is_empty());
+        Self::generate_items_stubs(&mut out, root_items, "");
+
         for t in &tables {
             out.push_str(&format!("---@class icefield.{}\n", t));
 
             // Sub-fields for intermediate tables
             let prefix = format!("{}.", t);
             for sub in &tables {
-                if let Some(rest) = sub.strip_prefix(&prefix) {
-                    if !rest.contains('.') {
-                        out.push_str(&format!(
-                            "---@field {} icefield.{}\n",
-                            rest, sub
-                        ));
-                    }
+                if let Some(rest) = sub.strip_prefix(&prefix)
+                    && !rest.contains('.')
+                {
+                    out.push_str(&format!(
+                        "---@field {} icefield.{}\n",
+                        rest, sub
+                    ));
                 }
             }
 
@@ -185,58 +192,73 @@ impl ApiRegistry {
 
             let table_items =
                 self.items.iter().filter(|i| i.table == t.as_str());
-            for item in table_items {
-                // Multi-line description support with unindent
-                for line in unindent(item.description) {
+            Self::generate_items_stubs(&mut out, table_items, t);
+        }
+
+        out
+    }
+
+    /// Helper to generate stubs for a specific list of items.
+    fn generate_items_stubs<'a>(
+        out: &mut String,
+        items: impl Iterator<Item = &'a LuaApiItem>,
+        table_name: &str,
+    ) {
+        let prefix = if table_name.is_empty() {
+            "icefield".to_string()
+        } else {
+            format!("icefield.{}", table_name)
+        };
+
+        for item in items {
+            // Multi-line description support with unindent
+            for line in unindent(item.description) {
+                if line.is_empty() {
+                    out.push_str("---\n");
+                } else {
+                    out.push_str(&format!("--- {}\n", line));
+                }
+            }
+
+            if let Some(ex) = item.example {
+                out.push_str("---\n---@example\n");
+                for line in unindent(ex) {
                     if line.is_empty() {
                         out.push_str("---\n");
                     } else {
                         out.push_str(&format!("--- {}\n", line));
                     }
                 }
+            }
 
-                if let Some(ex) = item.example {
-                    out.push_str("---\n---@example\n");
-                    for line in unindent(ex) {
-                        if line.is_empty() {
-                            out.push_str("---\n");
-                        } else {
-                            out.push_str(&format!("--- {}\n", line));
-                        }
-                    }
+            match &item.kind {
+                LuaItemKind::Variable { type_name } => {
+                    out.push_str("---\n");
+                    out.push_str(&format!("---@type {}\n", type_name));
+                    out.push_str(&format!(
+                        "{}.{} = nil\n\n",
+                        prefix, item.name
+                    ));
                 }
-
-                match &item.kind {
-                    LuaItemKind::Variable { type_name } => {
-                        out.push_str("---\n");
-                        out.push_str(&format!("---@type {}\n", type_name));
+                LuaItemKind::Function { params, returns } => {
+                    out.push_str("---\n");
+                    let mut param_names = Vec::new();
+                    for (p_name, p_type) in *params {
                         out.push_str(&format!(
-                            "icefield.{}.{} = nil\n\n",
-                            t, item.name
+                            "---@param {} {}\n",
+                            p_name, p_type
                         ));
+                        param_names.push(*p_name);
                     }
-                    LuaItemKind::Function { params, returns } => {
-                        out.push_str("---\n");
-                        let mut param_names = Vec::new();
-                        for (p_name, p_type) in *params {
-                            out.push_str(&format!(
-                                "---@param {} {}\n",
-                                p_name, p_type
-                            ));
-                            param_names.push(*p_name);
-                        }
-                        out.push_str(&format!("---@return {}\n", returns));
-                        out.push_str(&format!(
-                            "function icefield.{}.{}({}) end\n\n",
-                            t,
-                            item.name,
-                            param_names.join(", ")
-                        ));
-                    }
+                    out.push_str(&format!("---@return {}\n", returns));
+                    out.push_str(&format!(
+                        "function {}.{}({}) end\n\n",
+                        prefix,
+                        item.name,
+                        param_names.join(", ")
+                    ));
                 }
             }
         }
-
-        out
     }
 }

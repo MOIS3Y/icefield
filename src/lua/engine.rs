@@ -62,8 +62,8 @@ impl LuaEngine {
         );
         package.set("path", new_path)?;
 
-        let mut registry = crate::lua_registry::ApiRegistry::new();
-        crate::lua_api::register(&lua, paths, &mut registry)?;
+        let mut registry = crate::lua::registry::ApiRegistry::new();
+        crate::lua::register(&lua, paths, &mut registry)?;
 
         Ok(Self { lua })
     }
@@ -152,13 +152,12 @@ mod tests {
             file,
             "{}",
             r#"
-            local drv = icefield.drv
             return {
-                drv.toml({
+                icefield.drv.mkText({
                     name = "test",
                     enable = true,
-                    target = "out.toml",
-                    source = {}
+                    dst = "out.toml",
+                    src = "hello"
                 })
             }
             "#
@@ -182,88 +181,11 @@ mod tests {
     }
 
     #[test]
-    fn test_execute_simple_config() -> Result<()> {
-        let dir = tempdir()?;
-        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
-        let engine = LuaEngine::new(&paths).unwrap();
-        let script = r#"
-            local drv = icefield.drv
-            return {
-                drv.toml({
-                    name = "test-toml",
-                    enable = true,
-                    target = "dummy/test.toml",
-                    source = { key = "value" }
-                })
-            }
-        "#;
-
-        let derivations = engine.execute(script, "init.lua")?;
-        assert_eq!(derivations.len(), 1);
-        assert_eq!(derivations[0].meta.name, "test-toml");
-        assert_eq!(
-            derivations[0].meta.target.to_str().unwrap(),
-            "dummy/test.toml"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_execute_multiple_derivations() -> Result<()> {
-        let dir = tempdir()?;
-        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
-        let engine = LuaEngine::new(&paths).unwrap();
-        let script = r#"
-            local drv = icefield.drv
-            return {
-                drv.toml({
-                    name = "toml",
-                    enable = true,
-                    target = "dummy/toml",
-                    source = {}
-                }),
-                drv.symlink({
-                    name = "link",
-                    enable = true,
-                    target = "dummy/link",
-                    source = "/src/path"
-                })
-            }
-        "#;
-
-        let derivations = engine.execute(script, "init.lua")?;
-        assert_eq!(derivations.len(), 2);
-        assert_eq!(derivations[0].meta.name, "toml");
-        assert_eq!(derivations[1].meta.name, "link");
-        Ok(())
-    }
-
-    #[test]
     fn test_execute_invalid_script() -> Result<()> {
         let dir = tempdir()?;
         let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
         let engine = LuaEngine::new(&paths).unwrap();
         let script = "this is not valid lua";
-        let result = engine.execute(script, "init.lua");
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn test_execute_missing_required_fields() -> Result<()> {
-        let dir = tempdir()?;
-        let paths = paths::AppPaths::resolve(Some(dir.path().to_path_buf()));
-        let engine = LuaEngine::new(&paths).unwrap();
-        // Missing 'target' field
-        let script = r#"
-            local drv = icefield.drv
-            return {
-                drv.toml({
-                    name = "invalid",
-                    source = {}
-                })
-            }
-        "#;
         let result = engine.execute(script, "init.lua");
         assert!(result.is_err());
         Ok(())

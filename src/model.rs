@@ -5,7 +5,6 @@
 //! throughout the build and commit phases.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Common configuration metadata available in any constructor.
@@ -19,7 +18,7 @@ pub struct CommonMeta {
     /// If false, the derivation is completely ignored and its target is garbage collected.
     pub enable: bool,
     /// The final destination path on the filesystem.
-    pub target: PathBuf,
+    pub dst: PathBuf,
     /// If true, always overwrite the file even if the content hash hasn't changed.
     pub force: Option<bool>,
 
@@ -41,70 +40,20 @@ pub struct CommonMeta {
 #[derive(Deserialize, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DerivationKind {
-    // --- Structured Data (Serialization) ---
-    /// Generates a JSON file from a Lua table.
-    Json {
-        /// The data structure to serialize.
-        source: serde_json::Value,
-    },
-    /// Generates a YAML file from a Lua table.
-    Yaml {
-        /// The data structure to serialize.
-        source: serde_json::Value,
-    },
-    /// Generates a TOML file from a Lua table.
-    Toml {
-        /// The data structure to serialize.
-        source: serde_json::Value,
-    },
-    /// Generates an INI file with sections.
-    ///
-    /// Nested mapping: \[Section\] -> \[Key\] -> Value.
-    Ini {
-        /// Nested mapping: \[Section\] -> \[Key\] -> Value.
-        source: BTreeMap<String, BTreeMap<String, String>>,
-    },
-    /// Generates a flat `.env` file from a simple key-value map.
-    Env {
-        /// Mapping of environment variable names to their values.
-        source: BTreeMap<String, String>,
-    },
-
-    // --- Text and Templates (Rendering) ---
-    /// Writes raw, unformatted text directly to a file.
+    /// Writes raw, formatted text directly to a file.
     Text {
         /// The string content to write.
-        source: String,
+        src: String,
     },
-    /// Renders a Tera (Jinja2-style) template.
-    Template {
-        /// Path to the template file.
-        source: PathBuf,
-        /// Optional list of paths to other template files that can be included.
-        includes: Option<Vec<PathBuf>>,
-        /// Variables to inject into the template.
-        variables: serde_json::Value,
-    },
-    /// Compiles SCSS to CSS, supporting template variables.
-    Scss {
-        /// Path to the SCSS template file.
-        source: PathBuf,
-        /// Optional list of paths to other template files that can be included.
-        includes: Option<Vec<PathBuf>>,
-        /// Variables to inject into the SCSS template before compilation.
-        variables: serde_json::Value,
-    },
-
-    // --- Direct Assets (Filesystem) ---
     /// Physically copies a file from the configuration repository to the target.
     Copy {
         /// Path to the source file in the configuration repository.
-        source: PathBuf,
+        src: PathBuf,
     },
     /// Creates a symbolic link to an existing file or directory.
     Symlink {
         /// The source path the link should point to.
-        source: PathBuf,
+        src: PathBuf,
     },
 }
 

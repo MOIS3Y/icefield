@@ -1,10 +1,9 @@
-//! Phase 3: Commit.
+//! Phase 2: Commit.
 //!
 //! This module is responsible for applying the computed derivations to the
 //! actual filesystem. It handles atomicity, privilege elevation (sudo/doas),
 //! permission management, and garbage collection of orphaned files.
 
-use crate::builder::Builder;
 use crate::model::{Derivation, DerivationKind};
 use crate::paths;
 use crate::state::State;
@@ -98,7 +97,7 @@ impl Switcher {
         let mut skipped = 0;
 
         for der in derivations {
-            let target = &der.meta.target;
+            let target = &der.meta.dst;
             pb.set_message(format!("processing {}", der.meta.name));
 
             if !seen_targets.insert(target.clone()) {
@@ -108,9 +107,9 @@ impl Switcher {
             let is_forced = global_force || der.meta.force.unwrap_or(false);
 
             match &der.kind {
-                DerivationKind::Symlink { source } => {
+                DerivationKind::Symlink { src } => {
                     match self
-                        .apply_symlink(target, source, &der.meta, is_forced)?
+                        .apply_symlink(target, src, &der.meta, is_forced)?
                     {
                         ChangeKind::Created => created += 1,
                         ChangeKind::Updated => updated += 1,
@@ -119,11 +118,11 @@ impl Switcher {
                     new_state.add_file(
                         target.clone(),
                         der.meta.name.clone(),
-                        format!("symlink:{}", source.display()),
+                        format!("symlink:{}", src.display()),
                     );
                 }
-                DerivationKind::Copy { source } => {
-                    let hash = hash_file(source)?;
+                DerivationKind::Copy { src } => {
+                    let hash = hash_file(src)?;
                     let exists_on_disk = target.exists();
                     let hash_changed = current_state
                         .managed_files
@@ -132,7 +131,7 @@ impl Switcher {
                         != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
-                        self.copy_file(source, target, &der.meta)?;
+                        self.copy_file(src, target, &der.meta)?;
                         if exists_on_disk {
                             updated += 1;
                         } else {
@@ -148,9 +147,9 @@ impl Switcher {
                         hash,
                     );
                 }
-                _ => {
-                    let content = Builder::build(der)?;
-                    let hash = hash_content(&content);
+                DerivationKind::Text { src } => {
+                    let content = src;
+                    let hash = hash_content(content);
 
                     let exists_on_disk = target.exists();
                     let hash_changed = current_state
@@ -160,7 +159,7 @@ impl Switcher {
                         != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
-                        self.write_file(target, &content, &der.meta)?;
+                        self.write_file(target, content, &der.meta)?;
                         if exists_on_disk {
                             updated += 1;
                         } else {
@@ -573,11 +572,11 @@ mod tests {
     use crate::paths::AppPaths;
     use tempfile::tempdir;
 
-    fn mock_meta(target: PathBuf) -> CommonMeta {
+    fn mock_meta(dst: PathBuf) -> CommonMeta {
         CommonMeta {
             name: "test".to_string(),
             enable: true,
-            target,
+            dst,
             force: None,
             sudo: None,
             owner: None,
@@ -602,7 +601,7 @@ mod tests {
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Text {
-                source: "hello".to_string(),
+                src: "hello".to_string(),
             },
         }];
 
@@ -661,7 +660,7 @@ mod tests {
         let derivations = vec![Derivation {
             meta: mock_meta(target_path.clone()),
             kind: DerivationKind::Symlink {
-                source: source.clone(),
+                src: source.clone(),
             },
         }];
 
