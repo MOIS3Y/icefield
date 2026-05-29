@@ -138,6 +138,56 @@ impl ApiRegistry {
         out.push_str("---@return string\n");
         out.push_str("function string.trim(s) end\n\n");
 
+        // --- Custom UserData Classes ---
+        out.push_str("---@class icefield.Color\n");
+        out.push_str("---@field r number Red channel (0-255)\n");
+        out.push_str("---@field g number Green channel (0-255)\n");
+        out.push_str("---@field b number Blue channel (0-255)\n");
+        out.push_str("---@field a number Alpha channel (0.0-1.0)\n");
+        out.push_str("---@field h number Hue channel (0.0-360.0 degrees)\n");
+        out.push_str(
+            "---@field s number Saturation channel (0.0-100.0 percent)\n",
+        );
+        out.push_str(
+            "---@field l number Lightness channel (0.0-100.0 percent)\n",
+        );
+        out.push_str("local Color = {}\n\n");
+
+        out.push_str(
+            "--- Returns the HEX string representation of the color.\n",
+        );
+        out.push_str("---@param with_hash boolean|nil Whether to include the '#' prefix (default: true)\n");
+        out.push_str("---@return string\n");
+        out.push_str("function Color:to_hex(with_hash) end\n\n");
+
+        out.push_str("--- Returns the RGB string representation of the color (e.g., 'rgb(255, 0, 0)').\n");
+        out.push_str("---@return string\n");
+        out.push_str("function Color:to_rgb() end\n\n");
+
+        out.push_str("--- Returns the RGBA string representation of the color (e.g., 'rgba(255, 0, 0, 1.000)').\n");
+        out.push_str("---@return string\n");
+        out.push_str("function Color:to_rgba() end\n\n");
+
+        out.push_str("--- Returns the HSL string representation of the color (e.g., 'hsl(0, 100%, 50%)').\n");
+        out.push_str("---@return string\n");
+        out.push_str("function Color:to_hsl() end\n\n");
+
+        out.push_str("--- Returns the HSLA string representation of the color (e.g., 'hsla(0, 100%, 50%, 1.000)').\n");
+        out.push_str("---@return string\n");
+        out.push_str("function Color:to_hsla() end\n\n");
+
+        out.push_str(
+            "--- Returns a new Color object with shifted HSL values.\n",
+        );
+        out.push_str("---@param shifts {h: number|nil, s: number|nil, l: number|nil} The values to add to the current channels.\n");
+        out.push_str("---@return icefield.Color\n");
+        out.push_str("function Color:shift_hsl(shifts) end\n\n");
+
+        out.push_str("--- Returns a new Color object with the specified alpha channel.\n");
+        out.push_str("---@param a number The new alpha value (0.0-1.0).\n");
+        out.push_str("---@return icefield.Color\n");
+        out.push_str("function Color:alpha(a) end\n\n");
+
         // Build a list of all table paths, including intermediate ones.
         let mut table_paths = std::collections::HashSet::new();
         for item in &self.items {

@@ -29,6 +29,23 @@ pub fn register(registry: &mut ApiRegistry) -> Result<()> {
         },
     });
 
+    registry.items.push(LuaApiItem {
+        table: "color",
+        name: "parse_palette",
+        description: "Recursively parses a table, converting HEX strings into Color objects.",
+        example: Some(r##"
+            local theme = icefield.color.parse_palette({
+                bg = "#1e1e2e",
+                ansi = { red = "#f38ba8" }
+            })
+            print(theme.ansi.red:to_rgba())
+        "##),
+        kind: LuaItemKind::Function {
+            params: &[("t", "table")],
+            returns: "table",
+        },
+    });
+
     Ok(())
 }
 
@@ -50,6 +67,27 @@ pub fn bootstrap(lua: &Lua) -> Result<()> {
         local lib = icefield.lib
         lib.string = lib.string or {}
         lib.string.trim = string.trim
+
+        -- Inject color.parse_palette
+        local color = icefield.color
+        color.parse_palette = function(t)
+            local res = {}
+            for k, v in pairs(t) do
+                if type(v) == "table" then
+                    res[k] = color.parse_palette(v)
+                elseif type(v) == "string" and (v:match("^#") or v:match("^[0-9a-fA-F]+$")) then
+                    local ok, c = pcall(color.from_hex, v)
+                    if ok then
+                        res[k] = c
+                    else
+                        res[k] = v
+                    end
+                else
+                    res[k] = v
+                end
+            end
+            return res
+        end
         "#,
     )
     .exec()

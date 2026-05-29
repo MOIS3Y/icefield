@@ -5,6 +5,7 @@
 //! It includes tools for path expansion, command execution, formatting,
 //! and system inspection, organized into logical sub-tables.
 
+pub mod color;
 pub mod drv;
 pub mod engine;
 pub mod fetch;
@@ -36,6 +37,7 @@ pub fn register(
     drv::register(&icefield, lua, registry)?;
     lib::register(&icefield, lua, registry)?;
     render::register(&icefield, lua, registry)?;
+    color::register(&icefield, lua, registry)?;
 
     // Register metadata for injected pure-Lua functions
     prelude::register(registry)?;
@@ -79,6 +81,20 @@ mod tests {
         // Check prelude (string.trim)
         let trimmed: String = lua.load("return ('  hi  '):trim()").eval()?;
         assert_eq!(trimmed, "hi");
+
+        // Check parse_palette
+        let bg_hex: String = lua
+            .load(
+                r##"
+            local theme = icefield.color.parse_palette({
+                bg = "#1e1e2e",
+                not_color = "hello"
+            })
+            return theme.bg:to_hex()
+        "##,
+            )
+            .eval()?;
+        assert_eq!(bg_hex, "#1e1e2e");
 
         Ok(())
     }
