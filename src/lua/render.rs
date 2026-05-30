@@ -7,6 +7,8 @@
 use crate::lua::registry::{ApiRegistry, LuaApiItem, LuaItemKind};
 use anyhow::Context;
 use mlua::{Lua, LuaSerdeExt, Result, Table};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// Registers the rendering functions in the `icefield.render` table.
 pub fn register(
@@ -22,15 +24,17 @@ pub fn register(
         LuaApiItem {
             table: "render",
             name: "template",
-            description: "Renders a Tera (Jinja2-style) template using a configuration table.",
-            example: Some(r##"
+            description: "Renders a Tera template using a config table.",
+            example: Some(
+                r##"
                 local rendered = icefield.render.template({
                     src = icefield.fs.config_dir() .. "/templates/config.j2",
                     vars = { user = "admin" },
-                    scope = icefield.fs.config_dir() .. "/templates", -- optional
-                    includes = { "/path/to/extra.j2" } -- optional
+                    scope = icefield.fs.config_dir() .. "/templates",
+                    includes = { "/path/to/extra.j2" }
                 })
-            "##),
+            "##,
+            ),
             kind: LuaItemKind::Function {
                 params: &[("args", "table")],
                 returns: "string",
@@ -53,25 +57,28 @@ pub fn register(
                 includes = Some(
                     inc_list
                         .into_iter()
-                        .map(std::path::PathBuf::from)
+                        .map(PathBuf::from)
                         .collect::<Vec<_>>(),
                 );
             }
 
             let mut scope = None;
             if let Ok(s) = args.get::<String>("scope") {
-                scope = Some(std::path::PathBuf::from(s));
+                scope = Some(PathBuf::from(s));
             }
 
             let result = render_template(
-                std::path::Path::new(&path),
+                Path::new(&path),
                 scope.as_deref(),
                 includes.as_deref(),
                 &vars,
             )
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
-            tracing::debug!("Template rendered successfully ({} bytes)", result.len());
+            tracing::debug!(
+                "Template rendered successfully ({} bytes)",
+                result.len()
+            );
             Ok(result)
         },
     )?;
@@ -88,8 +95,8 @@ pub fn register(
                 local css = icefield.render.scss({
                     src = icefield.fs.config_dir() .. "/styles/main.scss",
                     vars = { accent = "#ff5500" },
-                    scope = icefield.fs.config_dir() .. "/styles", -- optional
-                    includes = { "/other/styles" } -- optional
+                    scope = icefield.fs.config_dir() .. "/styles",
+                    includes = { "/other/styles" }
                 })
             "##,
             ),
@@ -115,18 +122,18 @@ pub fn register(
                 includes = Some(
                     inc_list
                         .into_iter()
-                        .map(std::path::PathBuf::from)
+                        .map(PathBuf::from)
                         .collect::<Vec<_>>(),
                 );
             }
 
             let mut scope = None;
             if let Ok(s) = args.get::<String>("scope") {
-                scope = Some(std::path::PathBuf::from(s));
+                scope = Some(PathBuf::from(s));
             }
 
             let result = render_scss(
-                std::path::Path::new(&path),
+                Path::new(&path),
                 scope.as_deref(),
                 includes.as_deref(),
                 &vars,
@@ -151,95 +158,114 @@ pub fn register(
 ///
 /// Returns an error if the template cannot be read, parsed, or rendered.
 fn render_template(
-    path: &std::path::Path,
-    scope: Option<&std::path::Path>,
-    includes: Option<&[std::path::PathBuf]>,
+    path: &Path,
+    scope: Option<&Path>,
+    includes: Option<&[PathBuf]>,
     variables: &serde_json::Value,
 ) -> anyhow::Result<String> {
     let mut tera = tera::Tera::default();
 
-    // 1. Resolve scope (default to parent of src)
-    let effective_scope =
-        scope.or_else(|| path.parent()).ok_or_else(|| {
-            anyhow::anyhow!("Could not determine template scope")
-        })?;
+    let effective_scope = resolve_effective_scope(path, scope)?;
+    load_scope_templates(&mut tera, &effective_scope)?;
 
-    // 2. Load all templates from the scope to allow includes/imports.
-    // We use a custom loop instead of Tera::new(glob) to be more resilient
-    // to non-template files in the directory.
-    if effective_scope.is_dir() {
-        tracing::trace!(
-            "Tera: loading templates from scope: {}",
-            effective_scope.display()
-        );
-        let glob = format!("{}/**/*", effective_scope.to_string_lossy());
-
-        // Walk the directory and add files one by one, ignoring those that fail to parse
-        // (e.g. binary files, images, or invalid templates that are not meant to be loaded yet)
-        for entry in glob::glob(&glob)
-            .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?
-        {
-            if let Ok(path) = entry {
-                if path.is_file() {
-                    let name = path
-                        .strip_prefix(effective_scope)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .into_owned();
-
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if let Err(e) = tera.add_raw_template(&name, &content)
-                        {
-                            tracing::trace!(
-                                "Tera: skipping {} (parse error: {})",
-                                name,
-                                e
-                            );
-                        } else {
-                            tracing::trace!(
-                                "Tera: registered template: {}",
-                                name
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. Explicitly add extra includes
     if let Some(inc_paths) = includes {
-        for inc_path in inc_paths {
-            let name =
-                inc_path.file_name().and_then(|n| n.to_str()).ok_or_else(
-                    || anyhow::anyhow!("Invalid include path: {:?}", inc_path),
-                )?;
-            tracing::trace!(
-                "Adding explicit template include: {} as {}",
-                inc_path.display(),
-                name
-            );
-            tera.add_template_file(inc_path, Some(name)).with_context(
-                || format!("Failed to include template: {:?}", inc_path),
-            )?;
-        }
+        load_extra_templates(&mut tera, inc_paths)?;
     }
 
-    // 4. Ensure the main template is loaded (might be outside scope or overridden)
-    let template_content = std::fs::read_to_string(path)
+    // Ensure the main template is loaded (might be outside scope or overridden)
+    let template_content = fs::read_to_string(path)
         .with_context(|| format!("Failed to read template: {:?}", path))?;
     tera.add_raw_template("main", &template_content)?;
 
     let context = tera::Context::from_value(variables.clone())?;
     tera.render("main", &context)
-        .context("Template rendering failed")
+        .map_err(|e| anyhow::anyhow!("Template rendering failed: {}", e))
+}
+
+/// Determines the effective base directory for template discovery.
+fn resolve_effective_scope(
+    path: &Path,
+    scope: Option<&Path>,
+) -> anyhow::Result<PathBuf> {
+    let effective = scope
+        .map(|s| s.to_path_buf())
+        .or_else(|| path.parent().map(|p| p.to_path_buf()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not determine template scope")
+        })?;
+
+    Ok(fs::canonicalize(&effective).unwrap_or(effective))
+}
+
+/// Discovers and registers all templates within the specified scope.
+fn load_scope_templates(
+    tera: &mut tera::Tera,
+    scope: &Path,
+) -> anyhow::Result<()> {
+    if !scope.is_dir() {
+        return Ok(());
+    }
+
+    tracing::trace!("Tera: loading templates from scope: {}", scope.display());
+    let glob_pattern = format!("{}/**/*", scope.to_string_lossy());
+
+    let entries = glob::glob(&glob_pattern)
+        .map_err(|e| anyhow::anyhow!("Invalid glob pattern: {}", e))?;
+
+    for entry in entries.flatten() {
+        if entry.is_file() {
+            register_single_template(tera, scope, &entry);
+        }
+    }
+    Ok(())
+}
+
+/// Registers a single template file with Tera, using a clean relative name.
+fn register_single_template(tera: &mut tera::Tera, scope: &Path, path: &Path) {
+    let mut name = path
+        .strip_prefix(scope)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned();
+
+    if name.starts_with('/') {
+        name = name[1..].to_string();
+    }
+
+    if let Ok(content) = fs::read_to_string(path) {
+        if let Err(e) = tera.add_raw_template(&name, &content) {
+            tracing::trace!("Tera: skipping {} (parse error: {})", name, e);
+        } else {
+            tracing::trace!("Tera: registered template: {}", name);
+        }
+    }
+}
+
+/// Registers extra template files provided explicitly.
+fn load_extra_templates(
+    tera: &mut tera::Tera,
+    includes: &[PathBuf],
+) -> anyhow::Result<()> {
+    for inc_path in includes {
+        let name = inc_path.file_name().and_then(|n| n.to_str()).ok_or_else(
+            || anyhow::anyhow!("Invalid include path: {:?}", inc_path),
+        )?;
+
+        tracing::trace!(
+            "Adding explicit template include: {} as {}",
+            inc_path.display(),
+            name
+        );
+        tera.add_template_file(inc_path, Some(name))
+            .with_context(|| {
+                format!("Failed to include template: {:?}", inc_path)
+            })?;
+    }
+    Ok(())
 }
 
 /// A virtual file system implementation for `grass` (SCSS compiler) that processes
 /// imported files through `tera` (template engine) before passing them to the compiler.
-///
-/// This allows SCSS files included via `@use` or `@import` to contain Jinja2-style
-/// template variables, which will be evaluated using the provided context.
 #[derive(Debug)]
 struct TeraFs {
     /// The template context containing the variables to be injected.
@@ -247,17 +273,17 @@ struct TeraFs {
 }
 
 impl grass::Fs for TeraFs {
-    fn is_dir(&self, path: &std::path::Path) -> bool {
+    fn is_dir(&self, path: &Path) -> bool {
         path.is_dir()
     }
 
-    fn is_file(&self, path: &std::path::Path) -> bool {
+    fn is_file(&self, path: &Path) -> bool {
         path.is_file()
     }
 
-    fn read(&self, path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    fn read(&self, path: &Path) -> std::io::Result<Vec<u8>> {
         tracing::trace!("TeraFs: reading and rendering {}", path.display());
-        let content = std::fs::read_to_string(path)?;
+        let content = fs::read_to_string(path)?;
         let rendered = tera::Tera::one_off(&content, &self.context, false)
             .map_err(|e| {
                 std::io::Error::new(
@@ -275,9 +301,9 @@ impl grass::Fs for TeraFs {
 ///
 /// Returns an error if rendering the template or compiling SCSS fails.
 fn render_scss(
-    path: &std::path::Path,
-    scope: Option<&std::path::Path>,
-    includes: Option<&[std::path::PathBuf]>,
+    path: &Path,
+    scope: Option<&Path>,
+    includes: Option<&[PathBuf]>,
     variables: &serde_json::Value,
 ) -> anyhow::Result<String> {
     let context = tera::Context::from_value(variables.clone())?;
@@ -306,20 +332,16 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
-    use tempfile::NamedTempFile;
 
     #[test]
     fn test_render_template() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let subdir = dir.path().join("templates");
-        std::fs::create_dir(&subdir)?;
+        fs::create_dir(&subdir)?;
 
         let file_path = subdir.join("test.j2");
         // Tera uses double curly braces for variables: {{ var }}
-        write!(
-            std::fs::File::create(&file_path)?,
-            "Hello, {{{{ user_name }}}}"
-        )?;
+        write!(fs::File::create(&file_path)?, "Hello, {{{{ user_name }}}}")?;
 
         let variables = json!({ "user_name": "World" });
         let content = render_template(&file_path, None, None, &variables)?;
@@ -329,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_render_scss() -> anyhow::Result<()> {
-        let mut file = NamedTempFile::new()?;
+        let mut file = tempfile::NamedTempFile::new()?;
         // Tera: {{ color }}, SCSS literal: { }
         write!(file, "$color: {{{{ color }}}}; body {{ color: $color; }}")?;
 
