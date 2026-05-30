@@ -14,7 +14,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Synchronizes the desired configuration state with the filesystem.
 ///
@@ -40,6 +40,89 @@ impl Switcher {
         Self {
             paths: paths.clone(),
         }
+    }
+
+    /// Pre-flight check: detects unmanaged files at target paths.
+    /// Either backs them up or aborts execution if backups are not enabled.
+    fn handle_collisions(
+        &self,
+        derivations: &[Derivation],
+        state: &State,
+        cli_backup: bool,
+    ) -> Result<()> {
+        let mut fatal_collisions = Vec::new();
+        let mut to_backup = Vec::new();
+
+        for der in derivations {
+            let target = &der.meta.dst;
+
+            // Check if file exists and is NOT managed by us
+            if (target.exists() || fs::symlink_metadata(target).is_ok())
+                && !state.managed_files.contains_key(target)
+            {
+                if cli_backup {
+                    to_backup.push(target);
+                } else {
+                    fatal_collisions.push(target);
+                }
+            }
+        }
+
+        if !fatal_collisions.is_empty() {
+            println!(
+                "\n{} {}",
+                style("[ERROR]").red().bold(),
+                style("Collision detected!").bold()
+            );
+            println!(
+                "The following files exist and are not managed by Icefield:"
+            );
+            for path in &fatal_collisions {
+                println!("  - {}", style(path.display()).yellow());
+            }
+            println!(
+                "Please remove them manually or run with {} to move them aside.\n",
+                style("--backup").cyan()
+            );
+            anyhow::bail!("Pre-flight checks failed due to collisions.");
+        }
+
+        for path in to_backup {
+            let backup_path = PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                ".icefield-bak"
+            ));
+            info!(
+                "Backing up unmanaged file: {:?} -> {:?}",
+                path, backup_path
+            );
+            println!(
+                "  {} Backed up unmanaged file {}",
+                style("b").cyan(),
+                path.display()
+            );
+
+            if let Err(e) = fs::rename(path, &backup_path) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    if let Some(tool) = self.get_elevation_tool() {
+                        duct::cmd!(tool, "mv", path, &backup_path)
+                            .run()
+                            .with_context(|| {
+                                format!(
+                                    "Failed to backup elevated file: {:?}",
+                                    path
+                                )
+                            })?;
+                        continue;
+                    }
+                }
+                return Err(e)
+                    .context(format!("Failed to backup file {:?}", path));
+            }
+        }
+
+        Ok(())
     }
 
     /// Determines if a derivation requires privilege elevation.
@@ -70,6 +153,7 @@ impl Switcher {
         &self,
         derivations: &[Derivation],
         global_force: bool,
+        cli_backup: bool,
     ) -> Result<()> {
         println!(
             "{} {}",
@@ -79,6 +163,10 @@ impl Switcher {
 
         let state_file = self.paths.state_file();
         let current_state = State::load(&state_file)?;
+
+        // Pre-flight: check for collisions before any writes.
+        self.handle_collisions(derivations, &current_state, cli_backup)?;
+
         let mut new_state = State::default();
         let mut seen_targets = HashSet::new();
 
@@ -150,7 +238,6 @@ impl Switcher {
                 DerivationKind::Text { src } => {
                     let content = src;
                     let hash = hash_content(content);
-
                     let exists_on_disk = target.exists();
                     let hash_changed = current_state
                         .managed_files
@@ -159,7 +246,7 @@ impl Switcher {
                         != Some(&hash);
 
                     if is_forced || hash_changed || !exists_on_disk {
-                        self.write_file(target, content, &der.meta)?;
+                        self.write_text_file(target, content, &der.meta)?;
                         if exists_on_disk {
                             updated += 1;
                         } else {
@@ -169,7 +256,6 @@ impl Switcher {
                         debug!("Skipping unchanged file: {:?}", target);
                         skipped += 1;
                     }
-
                     new_state.add_file(
                         target.clone(),
                         der.meta.name.clone(),
@@ -179,14 +265,12 @@ impl Switcher {
             }
             pb.inc(1);
         }
+
         pb.finish_and_clear();
 
-        let removed = self.garbage_collect(&current_state, &seen_targets)?;
+        // Perform GC: remove files that were in the old state but not in the new one.
+        self.garbage_collect(&current_state, &new_state)?;
 
-        // Ensure the data directory exists before saving the state
-        if let Some(parent) = state_file.parent() {
-            paths::ensure_dir(parent)?;
-        }
         new_state.save(&state_file)?;
 
         println!(
@@ -195,371 +279,264 @@ impl Switcher {
             style(created).green(),
             style(updated).cyan(),
             style(skipped).dim(),
-            style(removed).yellow()
+            style(
+                new_state
+                    .managed_files
+                    .len()
+                    .saturating_sub(created + updated + skipped)
+            )
+            .yellow()
         );
 
         Ok(())
     }
 
-    /// Removes files that were managed in the previous state but are missing
-    /// in the current configuration. If a standard remove fails due to permissions,
-    /// it attempts to remove the file using elevated privileges.
+    /// Removes files that are no longer part of the managed configuration.
     fn garbage_collect(
         &self,
-        current_state: &State,
-        seen_targets: &HashSet<PathBuf>,
-    ) -> Result<usize> {
-        let mut removed_count = 0;
-        for path in current_state.managed_files.keys() {
-            if seen_targets.contains(path) {
-                continue;
-            }
-
-            warn!("Removing orphaned file: {:?}", path);
-            if !path.exists() && fs::symlink_metadata(path).is_err() {
-                continue;
-            }
-
-            if let Err(e) = fs::remove_file(path) {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    self.remove_elevated(path)?;
-                } else {
-                    return Err(e).with_context(|| {
-                        format!("Failed to remove orphan: {:?}", path)
-                    });
-                }
-            }
-            removed_count += 1;
-        }
-        Ok(removed_count)
-    }
-
-    /// Removes a file using the detected elevation tool (sudo/doas).
-    fn remove_elevated(&self, path: &PathBuf) -> Result<()> {
-        let tool = self.get_elevation_tool().ok_or_else(|| {
-            anyhow!(
-                "Permission denied and no elevation tool found for: {:?}",
-                path
-            )
-        })?;
-
-        duct::cmd!(tool, "rm", path).run().with_context(|| {
-            format!("Failed to remove orphan with elevation: {:?}", path)
-        })?;
-        Ok(())
-    }
-
-    /// Copies a file from source to target, handling elevation and atomicity.
-    fn copy_file(
-        &self,
-        source: &PathBuf,
-        target: &PathBuf,
-        meta: &crate::model::CommonMeta,
+        old_state: &State,
+        new_state: &State,
     ) -> Result<()> {
-        let use_sudo = self.needs_elevation(meta);
-
-        info!(
-            "Copying{}: {:?} -> {:?}",
-            if use_sudo { " (elevated)" } else { "" },
-            source,
-            target
-        );
-
-        let parent = target.parent().unwrap_or_else(|| Path::new(""));
-
-        if !parent.exists() {
-            if use_sudo {
-                let tool = self.get_elevation_tool().ok_or_else(|| {
-                    anyhow!("Elevation requested but no elevation tool found")
+        let mut removed = 0;
+        for (path, _) in &old_state.managed_files {
+            if !new_state.managed_files.contains_key(path) {
+                if !path.exists() && fs::symlink_metadata(path).is_err() {
+                    continue;
+                }
+                info!("Garbage collecting orphaned file: {:?}", path);
+                fs::remove_file(path).with_context(|| {
+                    format!("Failed to garbage collect file: {:?}", path)
                 })?;
-                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
-            } else {
-                paths::ensure_dir(parent)?;
+                removed += 1;
             }
         }
-
-        if use_sudo {
-            let tool = self.get_elevation_tool().ok_or_else(|| {
-                anyhow!("Elevation requested but no elevation tool found")
-            })?;
-            duct::cmd!(tool, "cp", source, target).run()?;
-            self.apply_ownership_elevated(tool, target, meta)?;
-            self.apply_permissions_elevated(tool, target, meta)?;
-        } else {
-            // Standard copy. Note: fs::copy is not atomic, so we use a temp file in the same dir.
-            let temp_file = tempfile::Builder::new()
-                .prefix(".icefield-tmp-")
-                .tempfile_in(parent)?;
-
-            fs::copy(source, temp_file.path())?;
-
-            // Copy permissions from meta if provided, or preserve from source?
-            // For managers, explicit is better.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode_str = meta.mode.as_deref().unwrap_or("644");
-                let mode =
-                    u32::from_str_radix(mode_str, 8).with_context(|| {
-                        format!("Invalid octal mode string: {}", mode_str)
-                    })?;
-                fs::set_permissions(
-                    temp_file.path(),
-                    fs::Permissions::from_mode(mode),
-                )?;
-            }
-
-            temp_file.persist(target).map_err(|e| anyhow!(e))?;
+        if removed > 0 {
+            debug!("Removed {} orphaned files", removed);
         }
-
         Ok(())
     }
 
-    /// Dispatches file writing to standard or elevated handlers based on metadata.
-    fn write_file(
+    /// Atomically writes content to a file.
+    ///
+    /// This method ensures the parent directory exists and uses temporary
+    /// files to prevent partial writes. If the target requires special
+    /// permissions, it delegates to the elevated write method.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parent directory cannot be created or if
+    /// the file write fails.
+    fn write_text_file(
         &self,
-        path: &PathBuf,
+        target: &Path,
         content: &str,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        let use_sudo = self.needs_elevation(meta);
+        let parent = target.parent().ok_or_else(|| {
+            anyhow!("Target path has no parent directory: {:?}", target)
+        })?;
+        paths::ensure_dir(parent)?;
 
-        debug!(
-            "Writing{}: {:?}",
-            if use_sudo { " (elevated)" } else { "" },
-            path
-        );
-
-        let parent = path.parent().unwrap_or_else(|| Path::new(""));
-
-        // Ensure parent exists before creating temp file in it
-        if !parent.exists() {
-            if use_sudo {
-                let tool = self.get_elevation_tool().ok_or_else(|| {
-                    anyhow!("Elevation requested but no elevation tool found")
-                })?;
-                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
-            } else {
-                paths::ensure_dir(parent)?;
-            }
-        }
-
-        // Determine where to create the temporary file.
-        // - If standard write: create in the target directory
-        //   to avoid cross-device link errors during `persist` (rename).
-        // - If elevated write: create in the global OS temp dir (/tmp).
-        //   We don't have write access to the target dir, and `sudo cp`
-        //   handles cross-device copying perfectly fine.
-        let temp_file = if use_sudo {
-            tempfile::NamedTempFile::new()?
+        if self.needs_elevation(meta) {
+            self.write_text_file_elevated(target, content, meta)
         } else {
-            tempfile::Builder::new()
-                .prefix(".icefield-tmp-")
-                .tempfile_in(parent)?
-        };
-
-        fs::write(temp_file.path(), content)?;
-
-        if use_sudo {
-            self.write_elevated(temp_file.path(), path, meta)?;
-        } else {
-            self.write_standard(temp_file, path, meta)?;
+            self.write_text_file_atomic(target, content, meta)
         }
+    }
+
+    /// Performs a standard atomic write using a temporary file.
+    fn write_text_file_atomic(
+        &self,
+        target: &Path,
+        content: &str,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        let parent = target.parent().unwrap();
+        let temp_file = tempfile::Builder::new()
+            .prefix(".icefield-tmp")
+            .tempfile_in(parent)
+            .context("Failed to create temporary file")?;
+
+        fs::write(temp_file.path(), content)
+            .context("Failed to write to temporary file")?;
+
+        self.apply_metadata(temp_file.path(), meta)?;
+
+        temp_file.persist(target).map_err(|e| {
+            anyhow!("Failed to persist file {:?}: {}", target, e)
+        })?;
 
         Ok(())
     }
 
-    /// Copies a temporary file to its final destination using elevated privileges.
-    fn write_elevated(
+    /// Performs an elevated write using the system's temporary directory.
+    fn write_text_file_elevated(
         &self,
-        temp_path: &Path,
-        dest_path: &PathBuf,
+        target: &Path,
+        content: &str,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = tempfile::Builder::new()
+            .prefix("icefield-elevated")
+            .tempfile_in(temp_dir)
+            .context("Failed to create elevated temporary file")?;
+
+        fs::write(temp_file.path(), content)
+            .context("Failed to write to elevated temporary file")?;
+
         let tool = self.get_elevation_tool().ok_or_else(|| {
-            anyhow!("Elevation requested but no elevation tool found")
+            anyhow!(
+                "Privilege elevation required but no tool found (sudo/doas)"
+            )
         })?;
 
-        duct::cmd!(tool, "cp", temp_path, dest_path).run()?;
-        self.apply_ownership_elevated(tool, dest_path, meta)?;
-        self.apply_permissions_elevated(tool, dest_path, meta)?;
+        duct::cmd!(tool, "mv", temp_file.path(), target)
+            .run()
+            .with_context(|| {
+                format!("Failed to move elevated file to {:?}", target)
+            })?;
+
+        self.apply_metadata_elevated(target, meta, tool)?;
 
         Ok(())
     }
 
-    /// Applies ownership changes using an elevation tool.
-    fn apply_ownership_elevated(
-        &self,
-        tool: &str,
-        path: &PathBuf,
-        meta: &crate::model::CommonMeta,
-    ) -> Result<()> {
-        if let Some(owner) = &meta.owner {
-            let group = meta.group.as_deref().unwrap_or("");
-            let spec = if group.is_empty() {
-                owner.clone()
-            } else {
-                format!("{}:{}", owner, group)
-            };
-            duct::cmd!(tool, "chown", spec, path).run()?;
-        } else if let Some(group) = &meta.group {
-            duct::cmd!(tool, "chgrp", group, path).run()?;
-        }
-        Ok(())
-    }
-
-    /// Applies permissions (mode and executable flag) using an elevation tool.
-    fn apply_permissions_elevated(
-        &self,
-        tool: &str,
-        path: &PathBuf,
-        meta: &crate::model::CommonMeta,
-    ) -> Result<()> {
-        let mode_str = meta.mode.as_deref().unwrap_or("644");
-        let mode = u32::from_str_radix(mode_str, 8).with_context(|| {
-            format!("Invalid octal mode string: {}", mode_str)
-        })?;
-        duct::cmd!(tool, "chmod", format!("{:o}", mode), path).run()?;
-        Ok(())
-    }
-
-    /// Persists a temporary file to its final destination with standard privileges.
-    fn write_standard(
-        &self,
-        temp_file: tempfile::NamedTempFile,
-        dest_path: &PathBuf,
-        meta: &crate::model::CommonMeta,
-    ) -> Result<()> {
-        temp_file.persist(dest_path).map_err(|e| anyhow!(e))?;
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode_str = meta.mode.as_deref().unwrap_or("644");
-            let mode =
-                u32::from_str_radix(mode_str, 8).with_context(|| {
-                    format!("Invalid octal mode string: {}", mode_str)
-                })?;
-            fs::set_permissions(dest_path, fs::Permissions::from_mode(mode))?;
-        }
-        Ok(())
-    }
-
-    /// Dispatches symlink creation to standard or elevated handlers.
+    /// Copies a physical file to the target destination.
     ///
-    /// Returns the kind of change performed.
+    /// # Errors
+    ///
+    /// Returns an error if the source cannot be read or target cannot be written.
+    fn copy_file(
+        &self,
+        src: &Path,
+        target: &Path,
+        meta: &crate::model::CommonMeta,
+    ) -> Result<()> {
+        let parent = target.parent().ok_or_else(|| {
+            anyhow!("Target path has no parent directory: {:?}", target)
+        })?;
+        paths::ensure_dir(parent)?;
+
+        if self.needs_elevation(meta) {
+            let tool = self.get_elevation_tool().ok_or_else(|| {
+                anyhow!("Privilege elevation required but no tool found (sudo/doas)")
+            })?;
+            duct::cmd!(tool, "cp", src, target).run().with_context(|| {
+                format!("Failed to copy elevated file to {:?}", target)
+            })?;
+            self.apply_metadata_elevated(target, meta, tool)?;
+        } else {
+            fs::copy(src, target).with_context(|| {
+                format!("Failed to copy file from {:?} to {:?}", src, target)
+            })?;
+            self.apply_metadata(target, meta)?;
+        }
+        Ok(())
+    }
+
+    /// Manages a symbolic link at the target path.
+    ///
+    /// If the path exists and is not a symlink, it will attempt to remove it
+    /// if `force` is true, otherwise it will return an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if symlink creation fails or if a collision occurs.
     fn apply_symlink(
         &self,
-        target: &PathBuf,
-        source: &PathBuf,
+        target: &Path,
+        source: &Path,
         meta: &crate::model::CommonMeta,
-        is_forced: bool,
+        force: bool,
     ) -> Result<ChangeKind> {
-        let use_sudo = self.needs_elevation(meta);
+        let parent = target.parent().ok_or_else(|| {
+            anyhow!("Target path has no parent directory: {:?}", target)
+        })?;
+        paths::ensure_dir(parent)?;
 
-        // Convert the source to an absolute path to ensure the symlink is valid
-        // regardless of where it is created.
-        let absolute_source =
-            std::fs::canonicalize(source).unwrap_or_else(|_| source.clone());
+        // Canonicalize source to make comparison reliable
+        let source =
+            fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
 
-        let exists_on_disk =
-            target.exists() || fs::symlink_metadata(target).is_ok();
-
-        if !is_forced && self.is_symlink_correct(target, &absolute_source)? {
-            debug!("Symlink already correct: {:?}", target);
-            return Ok(ChangeKind::None);
+        if target.exists() || fs::symlink_metadata(target).is_ok() {
+            let is_symlink =
+                fs::symlink_metadata(target)?.file_type().is_symlink();
+            if is_symlink {
+                let current_source = fs::read_link(target)?;
+                if current_source == source && !force {
+                    return Ok(ChangeKind::None);
+                }
+            }
+            if force || is_symlink {
+                if self.needs_elevation(meta) {
+                    let tool = self.get_elevation_tool().ok_or_else(|| {
+                        anyhow!("Privilege elevation tool required")
+                    })?;
+                    duct::cmd!(tool, "rm", "-rf", target).run()?;
+                } else {
+                    if target.is_dir() && !is_symlink {
+                        fs::remove_dir_all(target)?;
+                    } else {
+                        fs::remove_file(target)?;
+                    }
+                }
+            } else {
+                anyhow::bail!(
+                    "Path exists and is not a symlink: {:?}",
+                    target
+                );
+            }
         }
 
-        self.remove_target_if_exists(target, use_sudo)?;
-
-        info!(
-            "Linking{}: {:?} -> {:?}",
-            if use_sudo { " (elevated)" } else { "" },
-            target,
-            absolute_source
-        );
-
-        if use_sudo {
-            let tool = self.get_elevation_tool().ok_or_else(|| {
-                anyhow!("Elevation requested but no elevation tool found")
-            })?;
-            if let Some(parent) = target.parent().filter(|p| !p.exists()) {
-                duct::cmd!(tool, "mkdir", "-p", parent).run()?;
-            }
-            duct::cmd!(tool, "ln", "-sf", &absolute_source, target).run()?;
-
-            // Apply ownership and permissions to the symlink itself if elevated
-            self.apply_ownership_elevated_link(tool, target, meta)?;
+        if self.needs_elevation(meta) {
+            let tool = self
+                .get_elevation_tool()
+                .ok_or_else(|| anyhow!("Privilege elevation tool required"))?;
+            duct::cmd!(tool, "ln", "-s", source, target).run()?;
         } else {
-            if let Some(parent) = target.parent() {
-                paths::ensure_dir(parent)?;
-            }
             #[cfg(unix)]
-            std::os::unix::fs::symlink(&absolute_source, target)?;
-            #[cfg(not(unix))]
-            return Err(anyhow::anyhow!(
-                "Symlinks are only supported on Unix"
-            ));
+            std::os::unix::fs::symlink(source, target)?;
         }
 
-        if exists_on_disk {
+        if target.exists() {
             Ok(ChangeKind::Updated)
         } else {
             Ok(ChangeKind::Created)
         }
     }
 
-    /// Applies ownership changes to a symbolic link itself using -h flag.
-    fn apply_ownership_elevated_link(
+    /// Applies standard Unix metadata (mode/permissions) to a file.
+    fn apply_metadata(
         &self,
-        tool: &str,
-        path: &PathBuf,
+        path: &Path,
         meta: &crate::model::CommonMeta,
     ) -> Result<()> {
-        if let Some(owner) = &meta.owner {
-            let group = meta.group.as_deref().unwrap_or("");
-            let spec = if group.is_empty() {
-                owner.clone()
-            } else {
-                format!("{}:{}", owner, group)
-            };
-            duct::cmd!(tool, "chown", "-h", spec, path).run()?;
-        } else if let Some(group) = &meta.group {
-            duct::cmd!(tool, "chgrp", "-h", group, path).run()?;
+        if let Some(mode_str) = &meta.mode {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = u32::from_str_radix(mode_str, 8)
+                .context("Invalid octal mode")?;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .context("Failed to set permissions")?;
         }
         Ok(())
     }
 
-    /// Checks if a symlink exists at the target path and points to the correct source.
-    fn is_symlink_correct(
+    /// Applies metadata using elevated privileges.
+    fn apply_metadata_elevated(
         &self,
-        target: &PathBuf,
-        source: &PathBuf,
-    ) -> Result<bool> {
-        if target.exists() || fs::symlink_metadata(target).is_ok() {
-            let metadata = fs::symlink_metadata(target)?;
-            if metadata.file_type().is_symlink()
-                && &fs::read_link(target)? == source
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Removes an existing file or symlink at the target path before creating a new link.
-    /// Uses elevated privileges if requested.
-    fn remove_target_if_exists(
-        &self,
-        target: &PathBuf,
-        use_sudo: bool,
+        path: &Path,
+        meta: &crate::model::CommonMeta,
+        tool: &str,
     ) -> Result<()> {
-        if target.exists() || fs::symlink_metadata(target).is_ok() {
-            if use_sudo {
-                self.remove_elevated(target)?;
-            } else {
-                fs::remove_file(target)?;
-            }
+        if let Some(mode_str) = &meta.mode {
+            duct::cmd!(tool, "chmod", mode_str, path).run()?;
+        }
+        if let Some(owner) = &meta.owner {
+            duct::cmd!(tool, "chown", owner, path).run()?;
+        }
+        if let Some(group) = &meta.group {
+            duct::cmd!(tool, "chgrp", group, path).run()?;
         }
         Ok(())
     }
@@ -569,43 +546,42 @@ impl Switcher {
 mod tests {
     use super::*;
     use crate::model::CommonMeta;
-    use crate::paths::AppPaths;
     use tempfile::tempdir;
 
-    fn mock_meta(dst: PathBuf) -> CommonMeta {
-        CommonMeta {
-            name: "test".to_string(),
-            enable: true,
-            dst,
-            force: None,
-            sudo: None,
-            owner: None,
-            group: None,
-            mode: None,
+    fn mock_paths(base: &Path) -> paths::AppPaths {
+        paths::AppPaths {
+            config_dir: base.join("config"),
+            config_file: base.join("config").join("init.lua"),
+            data_dir: base.join("data"),
+            state_dir: base.join("state"),
+            cache_dir: base.join("cache"),
         }
     }
 
     #[test]
     fn test_apply_new_file() -> Result<()> {
         let dir = tempdir()?;
-        let data_dir = dir.path().join("data");
-        let paths = AppPaths::resolve(None);
-        // Manually override data_dir for testing
-        let mut paths = paths;
-        paths.data_dir = data_dir.clone();
-
-        let state_path = paths.state_file();
+        let paths = mock_paths(dir.path());
         let target_path = dir.path().join("test.txt");
-
-        let switcher = Switcher::new(&paths);
+        let state_path = paths.state_file();
         let derivations = vec![Derivation {
-            meta: mock_meta(target_path.clone()),
+            meta: CommonMeta {
+                name: "test".to_string(),
+                enable: true,
+                dst: target_path.clone(),
+                force: None,
+                sudo: None,
+                owner: None,
+                group: None,
+                mode: None,
+            },
             kind: DerivationKind::Text {
                 src: "hello".to_string(),
             },
         }];
 
-        switcher.apply(&derivations, false)?;
+        let switcher = Switcher::new(&paths);
+        switcher.apply(&derivations, false, false)?;
 
         assert!(target_path.exists());
         assert_eq!(fs::read_to_string(&target_path)?, "hello");
@@ -618,19 +594,17 @@ mod tests {
     #[test]
     fn test_apply_garbage_collection() -> Result<()> {
         let dir = tempdir()?;
-        let data_dir = dir.path().join("data");
-        let mut paths = AppPaths::resolve(None);
-        paths.data_dir = data_dir;
-
+        let paths = mock_paths(dir.path());
+        let target_path = dir.path().join("to_be_removed.txt");
         let state_path = paths.state_file();
-        let target_path = dir.path().join("orphan.txt");
 
-        // Pre-create an "orphaned" file and a state that tracks it
-        fs::write(&target_path, "orphan")?;
+        fs::create_dir_all(target_path.parent().unwrap())?;
+        fs::write(&target_path, "old content")?;
+
         let mut initial_state = State::default();
         initial_state.add_file(
             target_path.clone(),
-            "orphan-file".to_string(),
+            "old-der".to_string(),
             "old-hash".to_string(),
         );
         paths::ensure_dir(state_path.parent().unwrap())?;
@@ -638,7 +612,7 @@ mod tests {
 
         let switcher = Switcher::new(&paths);
         // Apply an empty config
-        switcher.apply(&[], false)?;
+        switcher.apply(&[], false, false)?;
 
         assert!(!target_path.exists());
         Ok(())
@@ -648,23 +622,28 @@ mod tests {
     #[cfg(unix)]
     fn test_apply_symlink() -> Result<()> {
         let dir = tempdir()?;
-        let data_dir = dir.path().join("data");
-        let mut paths = AppPaths::resolve(None);
-        paths.data_dir = data_dir;
-
+        let paths = mock_paths(dir.path());
         let target_path = dir.path().join("link");
         let source = dir.path().join("source.txt");
-        fs::write(&source, "content")?;
-
-        let switcher = Switcher::new(&paths);
+        fs::write(&source, "source content")?;
         let derivations = vec![Derivation {
-            meta: mock_meta(target_path.clone()),
+            meta: CommonMeta {
+                name: "test".to_string(),
+                enable: true,
+                dst: target_path.clone(),
+                force: None,
+                sudo: None,
+                owner: None,
+                group: None,
+                mode: None,
+            },
             kind: DerivationKind::Symlink {
                 src: source.clone(),
             },
         }];
 
-        switcher.apply(&derivations, false)?;
+        let switcher = Switcher::new(&paths);
+        switcher.apply(&derivations, false, false)?;
 
         assert!(fs::symlink_metadata(&target_path)?.file_type().is_symlink());
         assert_eq!(fs::read_link(&target_path)?, source);

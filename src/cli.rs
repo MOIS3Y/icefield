@@ -33,6 +33,10 @@ pub enum Commands {
         /// Force overwrite of all files, ignoring the state cache
         #[arg(short, long)]
         force: bool,
+
+        /// Enable backups for unmanaged files (overrides global config)
+        #[arg(short, long)]
+        backup: bool,
     },
     /// Clean up Icefield state, store, and logs
     Clean {

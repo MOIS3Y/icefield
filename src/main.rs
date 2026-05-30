@@ -45,7 +45,11 @@ fn main() -> anyhow::Result<()> {
             println!("{}", registry.generate_stubs());
             return Ok(());
         }
-        Commands::Switch { dry_run, force } => {
+        Commands::Switch {
+            dry_run,
+            force,
+            backup,
+        } => {
             let paths = paths::AppPaths::resolve(cli.config.clone());
             let _log_guard = logging::setup(cli.verbose, &paths);
 
@@ -67,6 +71,15 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
+            if backup {
+                println!(
+                    "{} {}",
+                    style("!").yellow(),
+                    style("Backup mode enabled (CLI override). Unmanaged files will be preserved.")
+                        .yellow()
+                );
+            }
+
             println!(
                 "{} {}",
                 style("❄").blue(),
@@ -78,7 +91,7 @@ fn main() -> anyhow::Result<()> {
 
             // Phase 2: Commit
             let switcher = Switcher::new(&paths);
-            switcher.apply(&derivations, force)?;
+            switcher.apply(&derivations, force, backup)?;
         }
         Commands::Info => {
             let paths = paths::AppPaths::resolve(cli.config.clone());
