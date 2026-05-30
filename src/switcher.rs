@@ -42,113 +42,16 @@ impl Switcher {
         }
     }
 
-    /// Pre-flight check: detects unmanaged files at target paths.
-    /// Either backs them up or aborts execution if backups are not enabled.
-    fn handle_collisions(
-        &self,
-        derivations: &[Derivation],
-        state: &State,
-        cli_backup: bool,
-    ) -> Result<()> {
-        let mut fatal_collisions = Vec::new();
-        let mut to_backup = Vec::new();
-
-        for der in derivations {
-            let target = &der.meta.dst;
-
-            // Check if file exists and is NOT managed by us
-            if (target.exists() || fs::symlink_metadata(target).is_ok())
-                && !state.managed_files.contains_key(target)
-            {
-                if cli_backup {
-                    to_backup.push(target);
-                } else {
-                    fatal_collisions.push(target);
-                }
-            }
-        }
-
-        if !fatal_collisions.is_empty() {
-            println!(
-                "\n{} {}",
-                style("[ERROR]").red().bold(),
-                style("Collision detected!").bold()
-            );
-            println!(
-                "The following files exist and are not managed by Icefield:"
-            );
-            for path in &fatal_collisions {
-                println!("  - {}", style(path.display()).yellow());
-            }
-            println!(
-                "Please remove them manually or run with {} to move them aside.\n",
-                style("--backup").cyan()
-            );
-            anyhow::bail!("Pre-flight checks failed due to collisions.");
-        }
-
-        for path in to_backup {
-            let backup_path = PathBuf::from(format!(
-                "{}{}",
-                path.display(),
-                ".icefield-bak"
-            ));
-            info!(
-                "Backing up unmanaged file: {:?} -> {:?}",
-                path, backup_path
-            );
-            println!(
-                "  {} Backed up unmanaged file {}",
-                style("b").cyan(),
-                path.display()
-            );
-
-            if let Err(e) = fs::rename(path, &backup_path) {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    if let Some(tool) = self.get_elevation_tool() {
-                        duct::cmd!(tool, "mv", path, &backup_path)
-                            .run()
-                            .with_context(|| {
-                                format!(
-                                    "Failed to backup elevated file: {:?}",
-                                    path
-                                )
-                            })?;
-                        continue;
-                    }
-                }
-                return Err(e)
-                    .context(format!("Failed to backup file {:?}", path));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Determines if a derivation requires privilege elevation.
-    ///
-    /// Elevation is required if `sudo` is true, or if a specific `owner` or
-    /// `group` is requested.
-    fn needs_elevation(&self, meta: &crate::model::CommonMeta) -> bool {
-        meta.sudo.unwrap_or(false)
-            || meta.owner.is_some()
-            || meta.group.is_some()
-    }
-
-    /// Detects the available privilege elevation tool.
-    ///
-    /// Currently supports `sudo` and `doas`. Returns `None` if neither is found.
-    fn get_elevation_tool(&self) -> Option<&'static str> {
-        if which::which("sudo").is_ok() {
-            Some("sudo")
-        } else if which::which("doas").is_ok() {
-            Some("doas")
-        } else {
-            None
-        }
-    }
-
     /// Applies a list of derivations to the system.
+    ///
+    /// This is the primary entry point for Phase 2 (Commit). It validates
+    /// the derivations, handles collisions (and backups), creates/updates
+    /// files, performs garbage collection, and saves the final state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails, if a collision is detected and
+    /// not handled, or if any filesystem operation fails.
     pub fn apply(
         &self,
         derivations: &[Derivation],
@@ -164,7 +67,10 @@ impl Switcher {
         let state_file = self.paths.state_file();
         let current_state = State::load(&state_file)?;
 
-        // Pre-flight: check for collisions before any writes.
+        // 1. Validate derivations for logical errors
+        self.validate_derivations(derivations)?;
+
+        // 2. Pre-flight: check for collisions before any writes.
         self.handle_collisions(derivations, &current_state, cli_backup)?;
 
         let mut new_state = State::default();
@@ -291,7 +197,139 @@ impl Switcher {
         Ok(())
     }
 
+    /// Pre-flight check: detects unmanaged files at target paths.
+    ///
+    /// If an unmanaged file is found, it will either be backed up (if enabled)
+    /// or added to a list of fatal collisions that will abort execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if unmanaged collisions are detected and backups
+    /// are not enabled, or if a backup operation fails.
+    fn handle_collisions(
+        &self,
+        derivations: &[Derivation],
+        state: &State,
+        cli_backup: bool,
+    ) -> Result<()> {
+        let mut fatal_collisions = Vec::new();
+        let mut to_backup = Vec::new();
+
+        for der in derivations {
+            let target = &der.meta.dst;
+
+            // Check if file exists and is NOT managed by us
+            if (target.exists() || fs::symlink_metadata(target).is_ok())
+                && !state.managed_files.contains_key(target)
+            {
+                if cli_backup {
+                    to_backup.push(target);
+                } else {
+                    fatal_collisions.push(target);
+                }
+            }
+        }
+
+        if !fatal_collisions.is_empty() {
+            println!(
+                "\n{} {}",
+                style("[ERROR]").red().bold(),
+                style("Collision detected!").bold()
+            );
+            println!(
+                "The following files exist and are not managed by Icefield:"
+            );
+            for path in &fatal_collisions {
+                println!("  - {}", style(path.display()).yellow());
+            }
+            println!(
+                "Please remove them manually or run with {} to move them aside.\n",
+                style("--backup").cyan()
+            );
+            anyhow::bail!("Pre-flight checks failed due to collisions.");
+        }
+
+        for path in to_backup {
+            let backup_path = PathBuf::from(format!(
+                "{}{}",
+                path.display(),
+                ".icefield-bak"
+            ));
+            info!(
+                "Backing up unmanaged file: {:?} -> {:?}",
+                path, backup_path
+            );
+            println!(
+                "  {} Backed up unmanaged file {}",
+                style("b").cyan(),
+                path.display()
+            );
+
+            if let Err(e) = fs::rename(path, &backup_path) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    if let Some(tool) = self.get_elevation_tool() {
+                        duct::cmd!(tool, "mv", path, &backup_path)
+                            .run()
+                            .with_context(|| {
+                                format!(
+                                    "Failed to backup elevated file: {:?}",
+                                    path
+                                )
+                            })?;
+                        continue;
+                    }
+                }
+                return Err(e)
+                    .context(format!("Failed to backup file {:?}", path));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validates the provided derivations for logical errors before execution.
+    ///
+    /// Currently checks if `mkCopy` is incorrectly used with directories.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any derivation is logically invalid.
+    fn validate_derivations(&self, derivations: &[Derivation]) -> Result<()> {
+        let mut errors = Vec::new();
+
+        for der in derivations {
+            if let DerivationKind::Copy { src } = &der.kind {
+                if src.is_dir() {
+                    errors.push(format!(
+                        "Derivation '{}' uses mkCopy with a directory: {:?}. \
+                        Please use mkLink instead for directories.",
+                        der.meta.name, src
+                    ));
+                }
+            }
+        }
+
+        if !errors.is_empty() {
+            println!(
+                "\n{} {}",
+                style("[ERROR]").red().bold(),
+                style("Validation failed!").bold()
+            );
+            for err in &errors {
+                println!("  - {}", style(err).yellow());
+            }
+            println!();
+            anyhow::bail!("Pre-flight validation failed.");
+        }
+
+        Ok(())
+    }
+
     /// Removes files that are no longer part of the managed configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a file removal operation fails.
     fn garbage_collect(
         &self,
         old_state: &State,
@@ -345,6 +383,11 @@ impl Switcher {
     }
 
     /// Performs a standard atomic write using a temporary file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary file cannot be created, written,
+    /// or persisted to the target path.
     fn write_text_file_atomic(
         &self,
         target: &Path,
@@ -370,6 +413,11 @@ impl Switcher {
     }
 
     /// Performs an elevated write using the system's temporary directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the temporary file cannot be created or if
+    /// the elevation tool fails to move the file.
     fn write_text_file_elevated(
         &self,
         target: &Path,
@@ -507,6 +555,11 @@ impl Switcher {
     }
 
     /// Applies standard Unix metadata (mode/permissions) to a file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the octal mode is invalid or if the
+    /// filesystem permission update fails.
     fn apply_metadata(
         &self,
         path: &Path,
@@ -523,6 +576,11 @@ impl Switcher {
     }
 
     /// Applies metadata using elevated privileges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the elevation tool fails to update permissions,
+    /// owner, or group.
     fn apply_metadata_elevated(
         &self,
         path: &Path,
@@ -539,6 +597,29 @@ impl Switcher {
             duct::cmd!(tool, "chgrp", group, path).run()?;
         }
         Ok(())
+    }
+
+    /// Determines if a derivation requires privilege elevation.
+    ///
+    /// Elevation is required if `sudo` is true, or if a specific `owner` or
+    /// `group` is requested.
+    fn needs_elevation(&self, meta: &crate::model::CommonMeta) -> bool {
+        meta.sudo.unwrap_or(false)
+            || meta.owner.is_some()
+            || meta.group.is_some()
+    }
+
+    /// Detects the available privilege elevation tool (sudo/doas).
+    ///
+    /// Returns `None` if no suitable tool is found in the system PATH.
+    fn get_elevation_tool(&self) -> Option<&'static str> {
+        if which::which("sudo").is_ok() {
+            Some("sudo")
+        } else if which::which("doas").is_ok() {
+            Some("doas")
+        } else {
+            None
+        }
     }
 }
 
