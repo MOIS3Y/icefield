@@ -6,8 +6,6 @@
 
 use crate::cli::CleanTarget;
 use crate::crypto::hash_file;
-use crate::lua::engine::LuaEngine;
-use crate::model::{Derivation, DerivationKind};
 use crate::paths::AppPaths;
 use crate::state::State;
 use anyhow::{Context, Result};
@@ -38,33 +36,16 @@ impl Cleaner {
             CleanTarget::Logs => self.clean_logs()?,
             CleanTarget::State => self.clean_state()?,
             CleanTarget::Store { force } => {
-                let derivations = self.get_derivations_for_gc(*force);
-                self.clean_store(&derivations, *force)?;
+                self.clean_store(*force)?;
             }
             CleanTarget::All => {
                 self.clean_state()?;
-                self.clean_store(&[], true)?;
+                self.clean_store(true)?;
                 self.clean_logs()?;
                 println!("\n{} System is clean!", style("★").magenta());
             }
         }
         Ok(())
-    }
-
-    /// Retrieves derivations needed for Smart GC, unless force mode is enabled.
-    fn get_derivations_for_gc(&self, force: bool) -> Vec<Derivation> {
-        if force {
-            return vec![];
-        }
-
-        LuaEngine::load_file(&self.paths).unwrap_or_else(|e| {
-            warn!("Failed to load lua config for smart GC: {}", e);
-            println!(
-                "  {} Failed to load configuration for smart GC. Run with --force to wipe store.",
-                style("!").red()
-            );
-            vec![]
-        })
     }
 
     /// Truncates the central log file to zero bytes.
@@ -178,7 +159,7 @@ impl Cleaner {
         }
     }
 
-    /// Checks if a file or symlink has been modified manually since it was managed.
+    /// Checks if a file or symlink has been modified manually.
     fn is_file_modified(&self, path: &Path, expected_hash: &str) -> bool {
         if expected_hash.starts_with("symlink:") {
             let expected_target =
@@ -234,7 +215,7 @@ impl Cleaner {
         }
     }
 
-    /// Attempts to remove a managed file, falling back to elevated privileges if needed.
+    /// Attempts to remove a managed file with elevation fallback.
     fn remove_managed_file(&self, path: &Path) -> bool {
         match fs::remove_file(path) {
             Ok(_) => {
@@ -311,7 +292,7 @@ impl Cleaner {
                         break;
                     }
                 }
-                Err(_) => break, // Stop ascending when not empty or permission denied
+                Err(_) => break, // Stop ascending when not empty
             }
         }
     }
@@ -341,11 +322,7 @@ impl Cleaner {
     }
 
     /// Smart GC: Removes artifacts from the store that are not referenced.
-    fn clean_store(
-        &self,
-        derivations: &[Derivation],
-        force: bool,
-    ) -> Result<()> {
+    fn clean_store(&self, force: bool) -> Result<()> {
         println!("{} Emptying store cache...", style("⨯").red());
         let store_dir = self.paths.store_dir();
 
@@ -358,7 +335,15 @@ impl Cleaner {
             return self.wipe_store_completely(&store_dir);
         }
 
-        self.perform_smart_gc(&store_dir, derivations)
+        // Smart GC: Load state to find which artifacts are actually in use
+        let state_file = self.paths.state_file();
+        let state = if state_file.exists() {
+            State::load(&state_file)?
+        } else {
+            State::default()
+        };
+
+        self.perform_smart_gc(&store_dir, &state)
     }
 
     /// Forcefully wipes the entire store directory.
@@ -384,13 +369,9 @@ impl Cleaner {
     }
 
     /// Performs the Smart GC logic to remove unused artifacts.
-    fn perform_smart_gc(
-        &self,
-        store_dir: &Path,
-        derivations: &[Derivation],
-    ) -> Result<()> {
+    fn perform_smart_gc(&self, store_dir: &Path, state: &State) -> Result<()> {
         let active_store_paths =
-            self.calculate_active_store_paths(store_dir, derivations);
+            self.calculate_active_store_paths(store_dir, state);
 
         let mut freed_bytes = 0;
         let mut removed_count = 0;
@@ -412,29 +393,37 @@ impl Cleaner {
         Ok(())
     }
 
-    /// Calculates which top-level artifact folders in the store are currently active.
+    /// Calculates which artifact folders in the store are currently active.
     fn calculate_active_store_paths(
         &self,
         store_dir: &Path,
-        derivations: &[Derivation],
+        state: &State,
     ) -> HashSet<std::ffi::OsString> {
         let mut active = HashSet::new();
-        for der in derivations {
-            if let DerivationKind::Copy { src }
-            | DerivationKind::Symlink { src } = &der.kind
-            {
-                if let Ok(relative_path) = src.strip_prefix(store_dir) {
-                    if let Some(artifact_folder) = relative_path.iter().next()
-                    {
-                        active.insert(artifact_folder.to_os_string());
+
+        for (target, file_state) in &state.managed_files {
+            // Check symlink targets
+            if file_state.hash.starts_with("symlink:") {
+                let link_target = &file_state.hash[8..];
+                if let Ok(rel) = Path::new(link_target).strip_prefix(store_dir)
+                {
+                    if let Some(folder) = rel.iter().next() {
+                        active.insert(folder.to_os_string());
                     }
+                }
+            }
+
+            // Also check if the managed file itself is inside the store
+            if let Ok(rel) = target.strip_prefix(store_dir) {
+                if let Some(folder) = rel.iter().next() {
+                    active.insert(folder.to_os_string());
                 }
             }
         }
         active
     }
 
-    /// Processes a single artifact folder in the store to determine if it should be removed.
+    /// Processes a single artifact folder in the store.
     fn process_store_entry(
         &self,
         entry: &fs::DirEntry,
@@ -537,7 +526,6 @@ fn get_elevation_tool() -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::CommonMeta;
     use tempfile::tempdir;
 
     fn mock_paths(base: &Path) -> AppPaths {
@@ -606,7 +594,7 @@ mod tests {
         cleaner.clean_state()?;
 
         assert!(!file1.exists()); // Should be deleted
-        assert!(file2.exists()); // Should be skipped due to manual modification
+        assert!(file2.exists()); // Should be skipped
 
         let new_state = State::load(&paths.state_file())?;
         assert!(new_state.managed_files.is_empty()); // State is wiped
@@ -664,7 +652,7 @@ mod tests {
         let cleaner = Cleaner::new(&paths, false);
         cleaner.clean_state()?;
 
-        assert!(!link_ok.exists() && fs::symlink_metadata(&link_ok).is_err()); // Deleted
+        assert!(!link_ok.exists() && fs::symlink_metadata(&link_ok).is_err());
         assert!(fs::read_link(&link_wrong).is_ok()); // Kept (wrong target)
         assert!(link_to_file.is_file()); // Kept (wrong type)
 
@@ -686,27 +674,23 @@ mod tests {
         fs::write(active_art.join("file.txt"), "active")?;
         fs::write(dead_art.join("file.txt"), "dead")?;
 
-        let derivations = vec![Derivation {
-            meta: CommonMeta {
-                name: "active".to_string(),
-                enable: true,
-                dst: PathBuf::from("dummy"),
-                force: None,
-                sudo: None,
-                owner: None,
-                group: None,
-                mode: None,
-            },
-            kind: DerivationKind::Copy {
-                src: active_art.join("file.txt"),
-            },
-        }];
+        // Setup state to reference the active artifact
+        let mut state = State::default();
+        state.add_file(
+            dir.path().join("link"),
+            "active".into(),
+            format!("symlink:{}", active_art.join("file.txt").display()),
+        );
+
+        let state_dir = paths.state_file().parent().unwrap().to_path_buf();
+        fs::create_dir_all(&state_dir)?;
+        state.save(&paths.state_file())?;
 
         let cleaner = Cleaner::new(&paths, false);
-        cleaner.clean_store(&derivations, false)?;
+        cleaner.clean_store(false)?;
 
-        assert!(active_art.exists()); // Active artifact should be kept
-        assert!(!dead_art.exists()); // Dead artifact should be removed
+        assert!(active_art.exists());
+        assert!(!dead_art.exists());
 
         Ok(())
     }
