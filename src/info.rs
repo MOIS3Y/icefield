@@ -198,7 +198,11 @@ fn inspect_regular_file(
                     style("[   OK    ]").green().bold(),
                     style(path.display()).cyan(),
                     style(format!("[{}]", name)).dim(),
-                    style(format!("[{}]", &expected_value[..8])).dim()
+                    style(format!(
+                        "[{}]",
+                        &actual_hash[..8.min(actual_hash.len())]
+                    ))
+                    .dim()
                 );
                 Status::Ok
             } else {

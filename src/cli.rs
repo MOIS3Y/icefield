@@ -51,16 +51,17 @@ pub enum Commands {
     Info,
     /// Generate EmmyLua stubs for IDE autocompletion
     Stubs,
+    /// Calculate the content-addressable fingerprint for a directory or remote resource
+    Fingerprint {
+        /// The path to the directory or a remote URL (e.g. github:user/repo)
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 pub enum CleanTarget {
     /// Smart GC: Removes artifacts from the store that are not in the current config
-    Store {
-        /// Completely wipe the store, bypassing Smart GC
-        #[arg(short, long)]
-        force: bool,
-    },
+    Store,
     /// Smart Uninstall: Removes managed files from the filesystem and clears state
     State,
     /// Truncates the central log file

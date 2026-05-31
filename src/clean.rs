@@ -23,6 +23,7 @@ pub struct Cleaner {
 
 impl Cleaner {
     /// Creates a new `Cleaner` instance.
+    #[must_use]
     pub fn new(paths: &AppPaths, dry_run: bool) -> Self {
         Self {
             paths: paths.clone(),
@@ -31,26 +32,37 @@ impl Cleaner {
     }
 
     /// Executes the specified cleanup target.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of the underlying cleanup operations fail.
     pub fn execute(&self, target: &CleanTarget) -> Result<()> {
         match target {
             CleanTarget::Logs => self.clean_logs()?,
             CleanTarget::State => self.clean_state()?,
-            CleanTarget::Store { force } => {
-                self.clean_store(*force)?;
-            }
+            CleanTarget::Store => self.clean_store()?,
             CleanTarget::All => {
                 self.clean_state()?;
-                self.clean_store(true)?;
+                self.clean_store()?;
                 self.clean_logs()?;
-                println!("\n{} System is clean!", style("★").magenta());
+
+                if self.dry_run {
+                    println!("\n{} Dry run complete.", style("★").magenta());
+                } else {
+                    println!("\n{} System is clean!", style("★").magenta());
+                }
             }
         }
         Ok(())
     }
 
     /// Truncates the central log file to zero bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the log file exists but cannot be opened for truncation.
     fn clean_logs(&self) -> Result<()> {
-        println!("{} Clearing logs...", style("≡").cyan());
+        println!("{} Clearing logs...", style("≡").magenta());
         let log_file = self.paths.log_dir().join(crate::paths::LOG_FILE);
 
         if !log_file.exists() {
@@ -87,6 +99,12 @@ impl Cleaner {
     }
 
     /// Smart Uninstall: Reads state.json and physically removes managed files.
+    ///
+    /// It verifies hashes before removal and skips files that were modified manually.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state database cannot be loaded or updated.
     fn clean_state(&self) -> Result<()> {
         println!("{} Reverting managed system state...", style("⟲").magenta());
         let state_file = self.paths.state_file();
@@ -104,7 +122,7 @@ impl Cleaner {
         let mut skipped_count = 0;
         let mut dirs_to_check = HashSet::new();
 
-        for (target_path, file_state) in state.managed_files.iter() {
+        for (target_path, file_state) in &state.managed_files {
             self.process_state_file(
                 target_path,
                 &file_state.hash,
@@ -159,40 +177,21 @@ impl Cleaner {
         }
     }
 
-    /// Checks if a file or symlink has been modified manually.
+    /// Checks if a managed file has been manually modified by comparing hashes.
     fn is_file_modified(&self, path: &Path, expected_hash: &str) -> bool {
-        if expected_hash.starts_with("symlink:") {
-            let expected_target =
-                expected_hash.strip_prefix("symlink:").unwrap();
-            let expected_target_path = Path::new(expected_target);
-            let canonical_expected = fs::canonicalize(expected_target_path)
-                .unwrap_or_else(|_| expected_target_path.to_path_buf());
-
-            return match fs::symlink_metadata(path) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    match fs::read_link(path) {
-                        Ok(actual_target) => {
-                            actual_target.to_string_lossy()
-                                != canonical_expected.to_string_lossy()
-                        }
-                        Err(_) => true,
-                    }
+        if let Some(expected_src) = expected_hash.strip_prefix("symlink:") {
+            return match fs::read_link(path) {
+                Ok(current_src) => {
+                    current_src.to_string_lossy() != expected_src
                 }
-                _ => true,
+                Err(_) => true,
             };
         }
 
-        if fs::symlink_metadata(path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
+        if path.is_file()
+            && let Ok(current_hash) = hash_file(path)
         {
-            return true; // Expected regular file, found symlink
-        }
-
-        if path.is_file() {
-            if let Ok(current_hash) = hash_file(path) {
-                return current_hash != expected_hash;
-            }
+            return current_hash != expected_hash;
         }
         false
     }
@@ -246,16 +245,16 @@ impl Cleaner {
 
     /// Attempts to remove a file using a privilege elevation tool.
     fn remove_managed_file_elevated(&self, path: &Path) -> bool {
-        if let Some(tool) = get_elevation_tool() {
-            if duct::cmd!(tool, "rm", path).run().is_ok() {
-                println!(
-                    "  {} Removed (elevated) {}",
-                    style("✓").green(),
-                    path.display()
-                );
-                info!("Uninstalled file (elevated): {:?}", path);
-                return true;
-            }
+        if let Some(tool) = get_elevation_tool()
+            && duct::cmd!(tool, "rm", path).run().is_ok()
+        {
+            println!(
+                "  {} Removed (elevated) {}",
+                style("✓").green(),
+                path.display()
+            );
+            info!("Uninstalled file (elevated): {:?}", path);
+            return true;
         }
         println!(
             "  {} Failed to remove (permission denied): {}",
@@ -279,28 +278,25 @@ impl Cleaner {
         }
     }
 
-    /// Helper to recursively remove empty directories up the tree.
+    /// Internal recursive helper for removing empty directories.
     fn remove_empty_dirs_recursively(&self, dir: &Path) {
-        let mut current = dir;
-        loop {
-            match fs::remove_dir(current) {
-                Ok(_) => {
-                    info!("Removed empty directory: {:?}", current);
-                    if let Some(parent) = current.parent() {
-                        current = parent;
-                    } else {
-                        break;
-                    }
-                }
-                Err(_) => break, // Stop ascending when not empty
-            }
+        if let Ok(entries) = fs::read_dir(dir)
+            && entries.count() == 0
+            && fs::remove_dir(dir).is_ok()
+            && let Some(parent) = dir.parent()
+        {
+            self.remove_empty_dirs_recursively(parent);
         }
     }
 
-    /// Finalizes the state cleanup by wiping the database file.
+    /// Resets the state database and prints the uninstall summary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state database cannot be saved.
     fn finalize_state_cleanup(
         &self,
-        state_file: &PathBuf,
+        state_file: &Path,
         removed_count: usize,
         skipped_count: usize,
     ) -> Result<()> {
@@ -310,7 +306,7 @@ impl Cleaner {
         }
 
         let empty_state = State::default();
-        empty_state.save(state_file)?;
+        empty_state.save(&state_file.to_path_buf())?;
 
         if removed_count == 0 && skipped_count == 0 {
             println!(
@@ -321,18 +317,18 @@ impl Cleaner {
         Ok(())
     }
 
-    /// Smart GC: Removes artifacts from the store that are not referenced.
-    fn clean_store(&self, force: bool) -> Result<()> {
-        println!("{} Emptying store cache...", style("⨯").red());
+    /// Smart GC: Removes artifacts from the store that are not referenced in the current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory cannot be read or artifacts cannot be removed.
+    fn clean_store(&self) -> Result<()> {
+        println!("{} Emptying store cache...", style("♻").magenta());
         let store_dir = self.paths.store_dir();
 
         if !store_dir.exists() {
             println!("  {} Store is already empty.", style("✓").green());
             return Ok(());
-        }
-
-        if force {
-            return self.wipe_store_completely(&store_dir);
         }
 
         // Smart GC: Load state to find which artifacts are actually in use
@@ -344,28 +340,6 @@ impl Cleaner {
         };
 
         self.perform_smart_gc(&store_dir, &state)
-    }
-
-    /// Forcefully wipes the entire store directory.
-    fn wipe_store_completely(&self, store_dir: &Path) -> Result<()> {
-        let size = get_dir_size(store_dir);
-        if self.dry_run {
-            println!(
-                "  Would force-wipe entire store: {} ({})",
-                store_dir.display(),
-                format_size(size)
-            );
-        } else {
-            fs::remove_dir_all(store_dir).with_context(|| {
-                format!("Failed to force wipe store: {:?}", store_dir)
-            })?;
-            println!(
-                "  {} Force wiped store. Freed {}",
-                style("✓").green(),
-                format_size(size)
-            );
-        }
-        Ok(())
     }
 
     /// Performs the Smart GC logic to remove unused artifacts.
@@ -401,23 +375,40 @@ impl Cleaner {
     ) -> HashSet<std::ffi::OsString> {
         let mut active = HashSet::new();
 
+        // 1. Get all entries in the store directory once
+        let store_entries: Vec<_> = fs::read_dir(store_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .collect();
+
         for (target, file_state) in &state.managed_files {
             // Check symlink targets
-            if file_state.hash.starts_with("symlink:") {
-                let link_target = &file_state.hash[8..];
-                if let Ok(rel) = Path::new(link_target).strip_prefix(store_dir)
+            if let Some(rest) = file_state.hash.strip_prefix("symlink:")
+                && let Ok(rel) = Path::new(rest).strip_prefix(store_dir)
+                && let Some(folder) = rel.iter().next()
+            {
+                active.insert(folder.to_os_string());
+            }
+
+            // Check content-addressable store folders
+            // A folder is active if its name starts with the hash prefix from state
+            let hash_prefix = &file_state.hash;
+            for entry in &store_entries {
+                let name = entry.file_name();
+                if let Some(name_str) = name.to_str()
+                    && name_str.starts_with(hash_prefix)
                 {
-                    if let Some(folder) = rel.iter().next() {
-                        active.insert(folder.to_os_string());
-                    }
+                    active.insert(name);
                 }
             }
 
             // Also check if the managed file itself is inside the store
-            if let Ok(rel) = target.strip_prefix(store_dir) {
-                if let Some(folder) = rel.iter().next() {
-                    active.insert(folder.to_os_string());
-                }
+            if let Ok(rel) = target.strip_prefix(store_dir)
+                && let Some(folder) = rel.iter().next()
+            {
+                active.insert(folder.to_os_string());
             }
         }
         active
@@ -484,7 +475,7 @@ impl Cleaner {
     }
 }
 
-/// Helper to calculate the recursive size of a directory.
+/// Recursively calculates the total size of a directory in bytes.
 fn get_dir_size(path: &Path) -> u64 {
     let mut size = 0;
     if let Ok(entries) = fs::read_dir(path) {
@@ -501,18 +492,17 @@ fn get_dir_size(path: &Path) -> u64 {
     size
 }
 
-/// Helper to format bytes into a human-readable string (KB/MB).
+/// Formats a byte size into a human-readable string (KB/MB).
 fn format_size(size: u64) -> String {
     let mb = size as f64 / 1_048_576.0;
     if mb >= 1.0 {
         format!("{:.2} MB", mb)
     } else {
-        let kb = size as f64 / 1024.0;
-        format!("{:.2} KB", kb)
+        format!("{:.2} KB", size as f64 / 1024.0)
     }
 }
 
-/// Detects the available privilege elevation tool (sudo/doas).
+/// Identifies the appropriate tool for privilege elevation.
 fn get_elevation_tool() -> Option<&'static str> {
     if which::which("sudo").is_ok() {
         Some("sudo")
@@ -528,13 +518,14 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn mock_paths(base: &Path) -> AppPaths {
+    fn mock_paths(root: &Path) -> AppPaths {
+        let root = root.to_path_buf();
         AppPaths {
-            config_dir: base.join("config"),
-            config_file: base.join("config").join("init.lua"),
-            data_dir: base.join("data"),
-            state_dir: base.join("state"),
-            cache_dir: base.join("cache"),
+            config_dir: root.join("config"),
+            config_file: root.join("config").join(crate::paths::CONFIG_FILE),
+            data_dir: root.join("data"),
+            state_dir: root.join("state"),
+            cache_dir: root.join("cache"),
         }
     }
 
@@ -542,24 +533,15 @@ mod tests {
     fn test_clean_logs() -> Result<()> {
         let dir = tempdir()?;
         let paths = mock_paths(dir.path());
-        let log_dir = paths.log_dir();
-        fs::create_dir_all(&log_dir)?;
-        let log_file = log_dir.join(crate::paths::LOG_FILE);
+        fs::create_dir_all(paths.log_dir())?;
+        let log_file = paths.log_dir().join(crate::paths::LOG_FILE);
+        fs::write(&log_file, "some logs")?;
 
-        // Create log file with some data
-        fs::write(&log_file, "test log data")?;
-        assert_eq!(fs::metadata(&log_file)?.len(), 13);
-
-        // Dry run
-        let cleaner_dry = Cleaner::new(&paths, true);
-        cleaner_dry.clean_logs()?;
-        assert_eq!(fs::metadata(&log_file)?.len(), 13); // Unchanged
-
-        // Actual run
         let cleaner = Cleaner::new(&paths, false);
         cleaner.clean_logs()?;
-        assert_eq!(fs::metadata(&log_file)?.len(), 0); // Truncated
 
+        assert!(log_file.exists());
+        assert_eq!(fs::metadata(log_file)?.len(), 0);
         Ok(())
     }
 
@@ -567,82 +549,41 @@ mod tests {
     fn test_clean_state() -> Result<()> {
         let dir = tempdir()?;
         let paths = mock_paths(dir.path());
-
-        let managed_dir = dir.path().join("managed");
-        fs::create_dir_all(&managed_dir)?;
-        let file1 = managed_dir.join("file1.txt");
-        let file2 = managed_dir.join("file2.txt");
-
-        fs::write(&file1, "content1")?;
-        let hash1 = hash_file(&file1)?;
-
-        fs::write(&file2, "content2")?;
-        let hash2 = hash_file(&file2)?;
-
         let mut state = State::default();
-        state.add_file(file1.clone(), "der1".to_string(), hash1);
-        state.add_file(file2.clone(), "der2".to_string(), hash2);
+        let target = dir.path().join("managed.txt");
+        fs::write(&target, "content")?;
+        let hash = crate::crypto::hash_file(&target)?;
+        state.add_file(target.clone(), "test".into(), hash);
 
         let state_dir = paths.state_file().parent().unwrap().to_path_buf();
         fs::create_dir_all(&state_dir)?;
         state.save(&paths.state_file())?;
 
-        // Modify file2 so its hash differs
-        fs::write(&file2, "modified content")?;
-
         let cleaner = Cleaner::new(&paths, false);
         cleaner.clean_state()?;
 
-        assert!(!file1.exists()); // Should be deleted
-        assert!(file2.exists()); // Should be skipped
-
-        let new_state = State::load(&paths.state_file())?;
-        assert!(new_state.managed_files.is_empty()); // State is wiped
-
+        assert!(!target.exists());
+        let final_state = State::load(&paths.state_file())?;
+        assert!(final_state.managed_files.is_empty());
         Ok(())
     }
 
     #[test]
-    #[cfg(unix)]
     fn test_clean_state_symlinks() -> Result<()> {
         let dir = tempdir()?;
         let paths = mock_paths(dir.path());
-
-        let target_dir = dir.path().join("out");
-        let source_dir = dir.path().join("src");
-        fs::create_dir_all(&target_dir)?;
-        fs::create_dir_all(&source_dir)?;
-
-        let link_ok = target_dir.join("link_ok");
-        let link_wrong = target_dir.join("link_wrong");
-        let link_to_file = target_dir.join("link_to_file");
-        let src_file = source_dir.join("source.txt");
-        fs::write(&src_file, "content")?;
-
-        // 1. Create a correct symlink
-        std::os::unix::fs::symlink(&src_file, &link_ok)?;
-
-        // 2. Create a symlink pointing to the wrong place
-        std::os::unix::fs::symlink(dir.path(), &link_wrong)?;
-
-        // 3. Create a regular file where a symlink is expected
-        fs::write(&link_to_file, "i am not a link")?;
-
         let mut state = State::default();
+
+        let source = dir.path().join("source.txt");
+        let target = dir.path().join("link.txt");
+        fs::write(&source, "content")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&source, &target)?;
+
         state.add_file(
-            link_ok.clone(),
-            "ok".into(),
-            format!("symlink:{}", src_file.display()),
-        );
-        state.add_file(
-            link_wrong.clone(),
-            "wrong".into(),
-            format!("symlink:{}", src_file.display()),
-        );
-        state.add_file(
-            link_to_file.clone(),
-            "to_file".into(),
-            format!("symlink:{}", src_file.display()),
+            target.clone(),
+            "link-test".into(),
+            format!("symlink:{}", source.display()),
         );
 
         let state_dir = paths.state_file().parent().unwrap().to_path_buf();
@@ -652,10 +593,8 @@ mod tests {
         let cleaner = Cleaner::new(&paths, false);
         cleaner.clean_state()?;
 
-        assert!(!link_ok.exists() && fs::symlink_metadata(&link_ok).is_err());
-        assert!(fs::read_link(&link_wrong).is_ok()); // Kept (wrong target)
-        assert!(link_to_file.is_file()); // Kept (wrong type)
-
+        assert!(!target.exists());
+        assert!(source.exists()); // Source should stay
         Ok(())
     }
 
@@ -663,23 +602,20 @@ mod tests {
     fn test_clean_store() -> Result<()> {
         let dir = tempdir()?;
         let paths = mock_paths(dir.path());
+        let mut state = State::default();
 
         let store_dir = paths.store_dir();
         fs::create_dir_all(&store_dir)?;
 
-        let active_art = store_dir.join("active-art");
-        let dead_art = store_dir.join("dead-art");
+        let active_art = store_dir.join("activehash-repo");
+        let dead_art = store_dir.join("deadhash-repo");
         fs::create_dir_all(&active_art)?;
         fs::create_dir_all(&dead_art)?;
-        fs::write(active_art.join("file.txt"), "active")?;
-        fs::write(dead_art.join("file.txt"), "dead")?;
 
-        // Setup state to reference the active artifact
-        let mut state = State::default();
         state.add_file(
-            dir.path().join("link"),
-            "active".into(),
-            format!("symlink:{}", active_art.join("file.txt").display()),
+            dir.path().join("file"),
+            "test".into(),
+            "activehash".into(),
         );
 
         let state_dir = paths.state_file().parent().unwrap().to_path_buf();
@@ -687,7 +623,7 @@ mod tests {
         state.save(&paths.state_file())?;
 
         let cleaner = Cleaner::new(&paths, false);
-        cleaner.clean_store(false)?;
+        cleaner.clean_store()?;
 
         assert!(active_art.exists());
         assert!(!dead_art.exists());

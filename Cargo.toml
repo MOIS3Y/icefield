@@ -21,6 +21,7 @@ duct = "1.1.1"
 flate2 = "1.1.9"
 glob = "0.3.3"
 grass = "0.13.4"
+walkdir = "2.5.0"
 indicatif = "0.18.4"
 mlua = { version = "0.11.6", features = ["lua54", "serialize"] }
 palette = { version = "0.7.6", features = ["std"] }
@@ -37,7 +38,7 @@ toml = "1.1.2"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "local-time", "time"] }
-ureq = "3.3.0"
+ureq = { version = "3.3.0", features = ["platform-verifier"] }
 which = "8.0.2"
 whoami = "2.1.2"
 zip = "8.6.0"

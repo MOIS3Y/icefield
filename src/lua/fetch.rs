@@ -31,7 +31,7 @@ pub fn register(
                 r##"
                 local path = icefield.fetch.url({
                     url = "https://example.com/file.tar.gz",
-                    hash = "sha256-...",
+                    hash = "...",
                     name = "my-file" -- optional
                 })
             "##,
@@ -67,7 +67,7 @@ pub fn register(
                 r##"
                 local path = icefield.fetch.tarball({
                     url = "https://github.com/user/repo/archive/main.tar.gz",
-                    hash = "sha256-...",
+                    hash = "...",
                     name = "my-repo" -- optional
                 })
             "##,
@@ -103,7 +103,7 @@ pub fn register(
                 r##"
                 local path = icefield.fetch.zip({
                     url = "https://example.com/archive.zip",
-                    hash = "sha256-..."
+                    hash = "..."
                 })
             "##,
             ),
@@ -140,7 +140,7 @@ pub fn register(
                     owner = "rust-lang",
                     repo = "rust",
                     rev = "master",
-                    hash = "sha256-..."
+                    hash = "..."
                 })
             "##,
             ),
@@ -164,8 +164,15 @@ pub fn register(
                 rev,
                 hash
             );
+            let url = crate::fetch::Fetcher::github_url(
+                host.as_deref(),
+                &owner,
+                &repo,
+                &rev,
+            );
+            let artifact_name = name.unwrap_or_else(|| repo.clone());
             let path = store
-                .fetch_from_github(host, &owner, &repo, &rev, &hash, name)
+                .fetch_tarball(&url, &hash, Some(artifact_name))
                 .map_err(|e| wrap_fetch_err(e, "GitHub"))?;
             tracing::debug!("Artifact stored at: {}", path.display());
             Ok(path.to_string_lossy().into_owned())
@@ -186,7 +193,7 @@ pub fn register(
                     owner = "inkscape",
                     repo = "inkscape",
                     rev = "master",
-                    hash = "sha256-..."
+                    hash = "..."
                 })
             "##,
             ),
@@ -210,8 +217,15 @@ pub fn register(
                 rev,
                 hash
             );
+            let url = crate::fetch::Fetcher::gitlab_url(
+                host.as_deref(),
+                &owner,
+                &repo,
+                &rev,
+            );
+            let artifact_name = name.unwrap_or_else(|| repo.clone());
             let path = store
-                .fetch_from_gitlab(host, &owner, &repo, &rev, &hash, name)
+                .fetch_tarball(&url, &hash, Some(artifact_name))
                 .map_err(|e| wrap_fetch_err(e, "GitLab"))?;
             tracing::debug!("Artifact stored at: {}", path.display());
             Ok(path.to_string_lossy().into_owned())
@@ -233,7 +247,7 @@ pub fn register(
                     owner = "gitea",
                     repo = "tea",
                     rev = "main",
-                    hash = "sha256-..."
+                    hash = "..."
                 })
             "##,
             ),
@@ -257,8 +271,15 @@ pub fn register(
                 rev,
                 hash
             );
+            let url = crate::fetch::Fetcher::gitea_url(
+                host.as_deref(),
+                &owner,
+                &repo,
+                &rev,
+            );
+            let artifact_name = name.unwrap_or_else(|| repo.clone());
             let path = store
-                .fetch_from_gitea(host, &owner, &repo, &rev, &hash, name)
+                .fetch_tarball(&url, &hash, Some(artifact_name))
                 .map_err(|e| wrap_fetch_err(e, "Gitea"))?;
             tracing::debug!("Artifact stored at: {}", path.display());
             Ok(path.to_string_lossy().into_owned())

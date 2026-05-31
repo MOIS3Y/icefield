@@ -286,10 +286,7 @@ impl grass::Fs for TeraFs {
         let content = fs::read_to_string(path)?;
         let rendered = tera::Tera::one_off(&content, &self.context, false)
             .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Tera render error: {}", e),
-                )
+                std::io::Error::other(format!("Tera render error: {}", e))
             })?;
         Ok(rendered.into_bytes())
     }

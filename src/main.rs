@@ -6,24 +6,27 @@
 //! 1. **Compute & Render**: Execute Lua to generate fully rendered derivations.
 //! 2. **Commit**: Synchronize the built content with the filesystem.
 
-mod cleaner;
+mod clean;
 mod cli;
 mod crypto;
-mod inspector;
+mod fetch;
+mod fingerprint;
+mod info;
 mod logging;
 mod lua;
 mod model;
 mod paths;
 mod state;
 mod store;
-mod switcher;
+mod switch;
 
 use clap::Parser;
-use cleaner::Cleaner;
 use cli::{Cli, Commands};
 use console::style;
+use fingerprint::Fingerprint;
+use info::inspect;
 use lua::engine::LuaEngine;
-use switcher::Switcher;
+use switch::Switcher;
 
 /// Application entry point.
 ///
@@ -35,6 +38,18 @@ fn main() -> anyhow::Result<()> {
 
     // Command dispatching
     match cli.command {
+        Commands::Fingerprint { target } => {
+            let target = target.unwrap_or_else(|| ".".to_string());
+            let fingerprint = Fingerprint::new();
+            let hash = fingerprint.calculate(&target)?;
+
+            println!(
+                "{} Resource fingerprint: {}\n{}",
+                style("❄").blue(),
+                style(&target).dim(),
+                style(hash).bold().cyan()
+            );
+        }
         Commands::Stubs => {
             // Generate Lua API stubs
             let paths = paths::AppPaths::resolve(None);
@@ -96,7 +111,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Info => {
             let paths = paths::AppPaths::resolve(cli.config.clone());
             let _log_guard = logging::setup(cli.verbose, &paths);
-            inspector::inspect(&paths)?;
+            inspect(&paths)?;
         }
         Commands::Clean { target, dry_run } => {
             let paths = paths::AppPaths::resolve(cli.config.clone());
@@ -110,7 +125,7 @@ fn main() -> anyhow::Result<()> {
                 );
             }
 
-            let cleaner = Cleaner::new(&paths, dry_run);
+            let cleaner = clean::Cleaner::new(&paths, dry_run);
             cleaner.execute(&target)?;
         }
     }

@@ -102,9 +102,14 @@ impl Switcher {
 
             match &der.kind {
                 DerivationKind::Symlink { src } => {
-                    match self
-                        .apply_symlink(target, src, &der.meta, is_forced)?
-                    {
+                    let canonical_src = fs::canonicalize(src)
+                        .unwrap_or_else(|_| src.to_path_buf());
+                    match self.apply_symlink(
+                        target,
+                        &canonical_src,
+                        &der.meta,
+                        is_forced,
+                    )? {
                         ChangeKind::Created => created += 1,
                         ChangeKind::Updated => updated += 1,
                         ChangeKind::None => skipped += 1,
@@ -112,7 +117,7 @@ impl Switcher {
                     new_state.add_file(
                         target.clone(),
                         der.meta.name.clone(),
-                        format!("symlink:{}", src.display()),
+                        format!("symlink:{}", canonical_src.display()),
                     );
                 }
                 DerivationKind::Copy { src } => {
@@ -266,18 +271,18 @@ impl Switcher {
             );
 
             if let Err(e) = fs::rename(path, &backup_path) {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    if let Some(tool) = self.get_elevation_tool() {
-                        duct::cmd!(tool, "mv", path, &backup_path)
-                            .run()
-                            .with_context(|| {
-                                format!(
-                                    "Failed to backup elevated file: {:?}",
-                                    path
-                                )
-                            })?;
-                        continue;
-                    }
+                if e.kind() == std::io::ErrorKind::PermissionDenied
+                    && let Some(tool) = self.get_elevation_tool()
+                {
+                    duct::cmd!(tool, "mv", path, &backup_path)
+                        .run()
+                        .with_context(|| {
+                            format!(
+                                "Failed to backup elevated file: {:?}",
+                                path
+                            )
+                        })?;
+                    continue;
                 }
                 return Err(e)
                     .context(format!("Failed to backup file {:?}", path));
@@ -298,14 +303,14 @@ impl Switcher {
         let mut errors = Vec::new();
 
         for der in derivations {
-            if let DerivationKind::Copy { src } = &der.kind {
-                if src.is_dir() {
-                    errors.push(format!(
-                        "Derivation '{}' uses mkCopy with a directory: {:?}. \
+            if let DerivationKind::Copy { src } = &der.kind
+                && src.is_dir()
+            {
+                errors.push(format!(
+                    "Derivation '{}' uses mkCopy with a directory: {:?}. \
                         Please use mkLink instead for directories.",
-                        der.meta.name, src
-                    ));
-                }
+                    der.meta.name, src
+                ));
             }
         }
 
@@ -336,7 +341,7 @@ impl Switcher {
         new_state: &State,
     ) -> Result<()> {
         let mut removed = 0;
-        for (path, _) in &old_state.managed_files {
+        for path in old_state.managed_files.keys() {
             if !new_state.managed_files.contains_key(path) {
                 if !path.exists() && fs::symlink_metadata(path).is_err() {
                     continue;
@@ -507,7 +512,10 @@ impl Switcher {
         let source =
             fs::canonicalize(source).unwrap_or_else(|_| source.to_path_buf());
 
-        if target.exists() || fs::symlink_metadata(target).is_ok() {
+        let exists_before =
+            target.exists() || fs::symlink_metadata(target).is_ok();
+
+        if exists_before {
             let is_symlink =
                 fs::symlink_metadata(target)?.file_type().is_symlink();
             if is_symlink {
@@ -547,7 +555,7 @@ impl Switcher {
             std::os::unix::fs::symlink(source, target)?;
         }
 
-        if target.exists() {
+        if exists_before {
             Ok(ChangeKind::Updated)
         } else {
             Ok(ChangeKind::Created)
